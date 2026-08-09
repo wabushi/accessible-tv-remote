@@ -1,0 +1,29 @@
+[Unit]
+Description=Bluetooth TV Accessibility Remote
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+User=root
+
+WorkingDirectory=/opt/accessible-tv-remote
+
+# Give the Raspberry Pi Bluetooth controller time
+# to initialize completely during boot.
+ExecStartPre=/bin/sleep 8
+
+ExecStart=/usr/bin/python3 /opt/accessible-tv-remote/tv_remote.py
+
+# btferret can leave the Bluetooth controller busy after
+# an immediate process restart, so start once per boot.
+Restart=no
+
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
