@@ -1,0 +1,10 @@
+build/
+sdkconfig
+sdkconfig.old
+.flash_config.json
+backend/web/node_modules/
+backend/web/dist/
+backend/devices.json
+
+__pycache__/
+*.py[cod]

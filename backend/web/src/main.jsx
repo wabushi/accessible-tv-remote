@@ -1,0 +1,222 @@
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import './style.css';
+
+const arrows = [
+  { key: 'UP', label: 'Up', symbol: '↑', position: 'up' },
+  { key: 'LEFT', label: 'Left', symbol: '←', position: 'left' },
+  { key: 'ENTER', label: 'OK, select', symbol: 'OK', position: 'center' },
+  { key: 'RIGHT', label: 'Right', symbol: '→', position: 'right' },
+  { key: 'DOWN', label: 'Down', symbol: '↓', position: 'down' },
+];
+
+function RemoteButton({ command, onSend, children, className = '', disabled = false }) {
+  return (
+    <button
+      className={`remote-button ${className}`}
+      type="button"
+      aria-label={command.label}
+      onClick={() => onSend(command.key)}
+      disabled={disabled}
+    >
+      {children}
+    </button>
+  );
+}
+
+function App() {
+  const [status, setStatus] = React.useState({ text: 'Ready when you are', kind: 'ready' });
+  const [sending, setSending] = React.useState(false);
+  const [padMode, setPadMode] = React.useState('directions');
+  const [devices, setDevices] = React.useState([]);
+  const [selectedDeviceId, setSelectedDeviceId] = React.useState('');
+  const [recording, setRecording] = React.useState(false);
+  const [recordedActions, setRecordedActions] = React.useState(() => {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem('lunatv-recording') || '[]');
+      return Array.isArray(saved) ? saved.filter((action) => action && typeof action.device_id === 'string' && typeof action.key === 'string') : [];
+    } catch { return []; }
+  });
+  const [happySeconds, setHappySeconds] = React.useState(0);
+  const happyLocked = React.useRef(false);
+
+  React.useEffect(() => {
+    window.localStorage.setItem('lunatv-recording', JSON.stringify(recordedActions));
+  }, [recordedActions]);
+
+  React.useEffect(() => {
+    if (happySeconds <= 0) return undefined;
+    const timer = window.setInterval(() => setHappySeconds((seconds) => Math.max(0, seconds - 1)), 1000);
+    return () => window.clearInterval(timer);
+  }, [happySeconds > 0]);
+
+  React.useEffect(() => {
+    if (happySeconds === 0) happyLocked.current = false;
+  }, [happySeconds]);
+
+  React.useEffect(() => {
+    let active = true;
+    async function refreshDevices() {
+      try {
+        const response = await fetch('/api/devices');
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'Could not load devices');
+        if (!active) return;
+        const nextDevices = Array.isArray(result.devices) ? result.devices : [];
+        setDevices(nextDevices);
+        setSelectedDeviceId((current) => nextDevices.some((device) => device.device_id === current)
+          ? current
+          : (nextDevices[0]?.device_id || ''));
+      } catch (error) {
+        if (active) setStatus((current) => current.kind === 'error' ? current : { text: 'Could not load remotes', kind: 'error' });
+      }
+    }
+    refreshDevices();
+    const timer = window.setInterval(refreshDevices, 1500);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
+
+  async function sendKey(key) {
+    if (!selectedDeviceId) return;
+    if (recording) {
+      setRecordedActions((actions) => [...actions, { device_id: selectedDeviceId, key }].slice(-100));
+    }
+    setSending(true);
+    setStatus({ text: `Sending ${key === 'ENTER' ? 'OK' : key.toLowerCase()}…`, kind: 'busy' });
+    try {
+      const response = await fetch('/api/commands', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_id: selectedDeviceId, key }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Request failed');
+      setStatus({ text: `${key === 'ENTER' ? 'OK' : key.toLowerCase()} queued`, kind: 'success' });
+    } catch (error) {
+      setStatus({ text: `Could not send: ${error.message}`, kind: 'error' });
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function toggleRecording() {
+    if (!recording) setRecordedActions([]);
+    setRecording((active) => !active);
+    setStatus(recording
+      ? { text: `Recording saved · ${recordedActions.length} actions`, kind: 'success' }
+      : { text: 'Recording actions from either remote', kind: 'busy' });
+  }
+
+  async function playRecording() {
+    if (happyLocked.current || !recordedActions.length) return;
+    happyLocked.current = true;
+    setHappySeconds(60);
+    setStatus({ text: `Playing ${recordedActions.length} recorded actions`, kind: 'busy' });
+    try {
+      const response = await fetch('/api/playback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ commands: recordedActions }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not start playback');
+      setStatus({ text: `Playing ${result.actions} actions across your remotes`, kind: 'success' });
+    } catch (error) {
+      happyLocked.current = false;
+      setHappySeconds(0);
+      setStatus({ text: `Could not play: ${error.message}`, kind: 'error' });
+    }
+  }
+
+  const back = { key: 'BACK', label: 'Back (Escape)' };
+  const xiaomiBack = { key: 'BACK_XIAOMI', label: 'Xiaomi Back (usage F1)' };
+  const selectedDevice = devices.find((device) => device.device_id === selectedDeviceId);
+  const remoteDisabled = !selectedDeviceId || sending;
+  return (
+    <main className="remote-shell">
+      <header className="device-header">
+        <nav className="device-tabs" role="tablist" aria-label="Registered remotes">
+          {devices.map((device) => (
+            <button
+              key={device.device_id}
+              id={`tab-${device.device_id}`}
+              className={`device-tab${device.device_id === selectedDeviceId ? ' selected' : ''}`}
+              type="button"
+              role="tab"
+              aria-selected={device.device_id === selectedDeviceId}
+              aria-controls="remote-panel"
+              onClick={() => { setSelectedDeviceId(device.device_id); setStatus({ text: 'Ready when you are', kind: 'ready' }); }}
+            >
+              <span className={`device-dot${device.online ? ' online' : ''}`} aria-hidden="true" />
+              <span className="device-name">{device.name || device.device_id}</span>
+            </button>
+          ))}
+          {devices.length === 0 && <span className="device-empty" role="status">Waiting for ESP32…</span>}
+        </nav>
+      </header>
+
+      <section id="remote-panel" role="tabpanel" aria-labelledby={selectedDevice ? `tab-${selectedDevice.device_id}` : undefined}>
+        <p className={`status status-${status.kind}`} role="status" aria-live="polite">
+          <span className="status-dot" aria-hidden="true" />{selectedDevice ? status.text : 'Flash and connect an ESP32 to register a remote'}
+        </p>
+
+        <section className="controls" aria-label="Navigation controls">
+        <div className="pad-switcher">
+          <div className="pad-heading">
+            <h2 id="pad-heading">{padMode === 'directions' ? 'Navigation' : 'Number pad'}</h2>
+            <button
+              type="button"
+              className="pad-toggle"
+              aria-label={`Show ${padMode === 'directions' ? 'number pad' : 'navigation pad'}`}
+              aria-pressed={padMode === 'numbers'}
+              onClick={() => setPadMode((mode) => mode === 'directions' ? 'numbers' : 'directions')}
+            >
+              <span aria-hidden="true">⟳</span> {padMode === 'directions' ? 'Numbers' : 'Arrows'}
+            </button>
+          </div>
+          {padMode === 'directions' ? (
+            <div className="direction-pad" aria-labelledby="pad-heading">
+              {arrows.map((command) => (
+                <RemoteButton key={command.key} command={command} onSend={sendKey} className={`direction ${command.position}`} disabled={remoteDisabled}>
+                  {command.symbol}
+                </RemoteButton>
+              ))}
+              <button type="button" className={`record-button${recording ? ' is-recording' : ''}`} onClick={toggleRecording} aria-pressed={recording}>
+                <span className="record-dot" aria-hidden="true" />{recording ? 'Stop' : 'Record'}
+                <span className="recording-count">{recordedActions.length} {recordedActions.length === 1 ? 'action' : 'actions'}</span>
+              </button>
+            </div>
+          ) : (
+            <div className="number-pad shared-pad" aria-labelledby="pad-heading">
+              {[1, 2, 3, 4, 5, 6, 7, 8, 9, '', 0, ''].map((number, index) => number === ''
+                ? <span className="number-spacer" key={`space-${index}`} aria-hidden="true" />
+                : <RemoteButton key={number} command={{ key: String(number), label: `Number ${number}` }} onSend={sendKey} className="number-button" disabled={remoteDisabled}>{number}</RemoteButton>)}
+            </div>
+          )}
+        </div>
+        <div className="back-buttons">
+          <RemoteButton command={back} onSend={sendKey} className="back-button" disabled={remoteDisabled}>
+            <span className="back-symbol" aria-hidden="true">↶</span>Back
+          </RemoteButton>
+          <RemoteButton command={xiaomiBack} onSend={sendKey} className="back-button xiaomi-back-button" disabled={remoteDisabled}>
+            <span className="back-symbol" aria-hidden="true">↶</span>Xiaomi Back · F1
+          </RemoteButton>
+        </div>
+        </section>
+
+        <section className="happy-section" aria-label="Happy button">
+        <button type="button" className="happy-button" aria-label={happySeconds ? `Playing recording, ${happySeconds} seconds remaining` : 'Play recorded actions'} onClick={playRecording} disabled={happySeconds > 0 || !recordedActions.length}>
+          <img src="/Happy.png" alt="Happy" />
+          {happySeconds > 0 && <span className="happy-timer" aria-hidden="true">
+            <svg viewBox="0 0 100 100"><circle className="timer-track" cx="50" cy="50" r="45" /><circle className="timer-progress" cx="50" cy="50" r="45" style={{ strokeDashoffset: `${283 * (1 - happySeconds / 60)}` }} /></svg>
+            <span className="timer-label">{happySeconds}</span>
+          </span>}
+        </button>
+        </section>
+      </section>
+      {sending && <span className="sr-only">Sending command</span>}
+    </main>
+  );
+}
+
+createRoot(document.getElementById('root')).render(<App />);

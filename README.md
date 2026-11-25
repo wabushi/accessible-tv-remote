@@ -1,499 +1,55 @@
 # Accessible TV Remote
 
-A Raspberry Pi-based accessible physical remote for Android TV / Google TV.
+Firmware for an accessible physical remote built around an ESP32-C3. The device reads five active-low switches and sends the same keyboard sequences as the original Raspberry Pi prototype over Bluetooth LE HID.
 
-The Raspberry Pi presents itself to the TV as a Bluetooth Low Energy (BLE) HID keyboard. Physical switches connected to the Pi's GPIO pins trigger predefined keyboard sequences, allowing complicated remote-control actions to be reduced to a single large physical button press.
+## Current migration scope
 
-The project was developed as an accessibility interface for users who may have difficulty operating a conventional television remote.
+This branch ports the existing physical button mappings to ESP32-C3 firmware and adds a Wi-Fi command path. The device advertises as a BLE keyboard, polls the backend using outbound HTTP POST requests, and sends received commands to its paired host as key presses.
 
-## What It Does
+| Button | Original Pi BCM pin | ESP32-C3 sample GPIO | Keyboard sequence |
+|---|---:|---:|---|
+| 1 | 25 | 0 | `1 → 5 → 7` |
+| 2 | 24 | 1 | `6 → 8` |
+| 3 | 23 | 2 | `6 → 9` |
+| 4 | 27 | 3 | `1 → 5` |
+| 5 | 26 | 4 | `0 → 0 → 0` |
 
-Each physical switch is assigned a sequence of keyboard inputs.
+GPIO values are example assignments, not header pin numbers. Check the pinout and boot-strapping constraints for the exact ESP32-C3 board before wiring. Each switch should connect its GPIO to ground when pressed; firmware enables the internal pull-up. Use 3.3 V logic only.
 
-The default configuration is:
+## Build and provision
 
-| BCM GPIO | Sequence |
-|---:|---|
-| 25 | `1 → 5 → 7` |
-| 24 | `6 → 8` |
-| 23 | `6 → 9` |
-| 27 | `1 → 5` |
-| 26 | `0 → 0 → 0` |
-
-The sequences are completely configurable in `tv_remote.py`.
-
-The software also provides:
-
-- Bluetooth LE HID keyboard emulation
-- Physical GPIO switch inputs
-- Configurable key sequences
-- 2-second global input cooldown
-- Persistent Bluetooth pairing
-- Automatic reconnection after reboot
-- Automatic startup using systemd
-- Console logging for testing and debugging
-
-## Hardware
-
-The prototype uses:
-
-- A Raspberry Pi with Bluetooth support
-- Five physical microswitches/buttons
-- Appropriate GPIO wiring
-- An Android TV / Google TV device supporting Bluetooth HID keyboards
-
-The physical switches can be placed beneath much larger custom button caps or a 3D-printed interface, allowing the controls themselves to be considerably larger than the electrical switches.
-
-## Software Architecture
-
-This project uses **btferret** for the low-level Bluetooth implementation.
-
-btferret:
-https://github.com/petzval/btferret
-
-The relationship is roughly:
-
-```text
-Physical button
-      │
-      ▼
-Raspberry Pi GPIO
-      │
-      ▼
-tv_remote.py
-      │
-      ▼
-btferret / btfpy
-      │
-      ▼
-Bluetooth LE HID
-      │
-      ▼
-Android TV / Google TV
-```
-
-`tv_remote.py` adapts btferret's HID keyboard functionality and adds the GPIO, accessibility-control, key-sequence, cooldown, pairing-persistence and startup logic required by this project.
-
-## Repository Contents
-
-```text
-accessible-tv-remote/
-├── tv_remote.py
-├── keyboard.txt
-├── tv-remote.service
-├── README.md
-├── LICENSE
-└── wiring/
-```
-
-The compiled `btfpy.so` module is deliberately **not** included in this repository. It is built locally from btferret for the Raspberry Pi and Python version being used.
-
----
-
-# Installation
-
-## 1. Install Required Packages
-
-Update the package list:
+Activate ESP-IDF using Espressif's setup instructions, then from this directory run:
 
 ```bash
-sudo apt update
+python3 scripts/flash.py
 ```
 
-Install Git, Python development files, setuptools and GPIO Zero:
+The script prompts for the serial port, Wi-Fi SSID/password, Bluetooth HID name, and backend base URL, then builds and flashes the firmware and provisions its NVS partition. The Bluetooth HID name is also the ESP32's device ID, so give every board a unique name; press Enter to reuse the saved name when reflashing the same board. The script remembers values in the git-ignored `.flash_config.json` file; press Enter to reuse a displayed value. The saved Wi-Fi password is displayed in the prompt so it can be reviewed; press Enter to reuse it, or enter `!` to clear it (useful for an open Wi-Fi network). The config file is restricted to the current user's permissions, but it stores the Wi-Fi password in plain text. Temporary provisioning files are removed when the script exits. Settings are also stored in the ESP32's NVS partition (not encrypted by this setup). To build without provisioning, use `idf.py build`.
+
+## Backend remote
+
+Build the React remote once, then run the Python server on a machine reachable by the ESP32:
 
 ```bash
-sudo apt install git python3 python3-dev python3-setuptools python3-gpiozero
+npm --prefix backend/web install
+npm --prefix backend/web run build
+python3 backend/server.py
 ```
 
-## 2. Install btferret
+Open `http://<server-address>:8080/` in a browser. Each ESP32 registers on its first poll and appears as a selectable tab; the tab's green dot indicates that the device has polled recently. Commands are queued separately for the selected device. The browser provides arrows, OK/Enter, Back, and digits 0–9. `backend/devices.json` stores registered device names across server restarts and is generated locally. `backend/Icon.png` is used for the page, browser favicon, touch icon, and installed-app icon. The browser queues a key with `POST /api/commands`; each ESP32 polls `POST /api/poll` every 700 ms and acknowledges a key at `POST /api/ack` after sending it. Command queues are in memory and cleared if the server restarts. Provision the same backend base URL (for example, `http://192.168.1.20:8080`) on each board when flashing. This firmware currently uses plain HTTP, which exposes commands to anyone on the network path; use it only on a trusted network. Before using a remote server, configure TLS certificate validation in the firmware. This starter server has no login or command authentication and is intended for a trusted network during development.
 
-Clone the upstream btferret repository:
+The code uses sample GPIO assignments shown below; verify the pinout and strapping pins for the specific board before wiring. GPIO assignment can be changed in `main/main.c`.
 
-```bash
-cd /opt
-sudo git clone https://github.com/petzval/btferret.git
-```
+The board advertises as a BLE keyboard. Pair it with the TV (or other BLE host) using the configured name. `BACK` sends standard keyboard Escape. The web app also exposes `BACK_XIAOMI`, which sends Keyboard-page usage `0xF1`; community captures report this usage for Back on Xiaomi Bluetooth Remote 2 Pro. That mapping is model/host dependent, so compare both controls on the target TV. The HID descriptor's key array includes usage `0xF1` for this option.
 
-Give your normal user ownership of the checkout while building:
+## TV network control investigation
 
-```bash
-sudo chown -R "$USER":"$USER" /opt/btferret
-```
+If BLE key translation remains a problem, community implementations describe two possible network paths: Xiaomi MiLink (commonly TCP port 6091) on supported Xiaomi TVs, and Android TV Remote v2 (TLS, pairing required; commonly ports 6466/6467). Device support varies. Identify the TV model and its LAN IP before choosing or probing either path; these protocols are not implemented by this project yet. See [MiTV-Remote protocol notes](https://github.com/EndLess728/MiTV-Remote) for device-specific findings.
 
-Enter the directory:
+## Original Raspberry Pi prototype
 
-```bash
-cd /opt/btferret
-```
-
-Build the Python module:
-
-```bash
-python3 btfpymake.py build
-```
-
-A successful build creates:
-
-```text
-btfpy.so
-```
-
-in the btferret directory.
-
-The exact compiled extension generated inside the build directory depends on the Python version and processor architecture. `btfpymake.py` copies the appropriate extension out and names it `btfpy.so`.
-
-## 3. Install Accessible TV Remote
-
-Clone this repository:
-
-```bash
-cd /opt
-sudo git clone YOUR_REPOSITORY_URL accessible-tv-remote
-```
-
-Set normal ownership if desired:
-
-```bash
-sudo chown -R "$USER":"$USER" /opt/accessible-tv-remote
-```
-
-Copy the locally compiled btferret Python module into the application directory:
-
-```bash
-sudo cp /opt/btferret/btfpy.so /opt/accessible-tv-remote/
-```
-
-The resulting installation should look like:
-
-```text
-/opt/
-├── btferret/
-│   ├── btfpy.so
-│   └── ...
-│
-└── accessible-tv-remote/
-    ├── btfpy.so
-    ├── tv_remote.py
-    ├── keyboard.txt
-    ├── tv-remote.service
-    └── ...
-```
-
-This keeps the upstream btferret repository separate from the accessibility application.
-
----
-
-# Bluetooth Configuration
-
-## 4. Find the Raspberry Pi Bluetooth Address
-
-Run:
-
-```bash
-bluetoothctl show
-```
-
-Find the controller address. It will look similar to:
-
-```text
-Controller AA:BB:CC:DD:EE:FF
-```
-
-Open:
-
-```bash
-nano /opt/accessible-tv-remote/keyboard.txt
-```
-
-Replace:
-
-```text
-ADDRESS = XX:XX:XX:XX:XX:XX
-```
-
-with the Pi's actual Bluetooth controller address.
-
-For example:
-
-```text
-DEVICE = My Pi TYPE=Mesh node=1 ADDRESS = AA:BB:CC:DD:EE:FF
-```
-
-Do not copy the example address.
-
----
-
-# Wiring
-
-The application currently expects switches on the following BCM GPIO numbers:
-
-```text
-GPIO 25
-GPIO 24
-GPIO 23
-GPIO 27
-GPIO 26
-```
-
-The software uses **BCM numbering**, not physical header pin numbers.
-
-See the diagram in the `wiring/` directory before connecting the switches.
-
-> Raspberry Pi GPIO uses 3.3 V logic. Do not apply 5 V directly to a GPIO input.
-
----
-
-# First Test
-
-Before enabling automatic startup, run the application manually.
-
-```bash
-cd /opt/accessible-tv-remote
-sudo python3 tv_remote.py
-```
-
-Root privileges are required because btferret directly accesses the Bluetooth hardware.
-
-A successful startup should eventually display something similar to:
-
-```text
-Starting Bluetooth TV accessibility remote...
-Initialising btferret...
-Waiting for Android TV connection...
-Advertising as ... HID device
-```
-
-On the Android TV / Google TV device:
-
-1. Open Bluetooth / Remotes & Accessories.
-2. Search for a new accessory.
-3. Select the HID device.
-4. Complete pairing.
-
-The Pi should report a successful connection.
-
-For example:
-
-```text
-PAIR OK
-TV connected: node 1000
-Bluetooth pairing information saved.
-GPIO buttons are now active.
-```
-
-Test each physical switch and confirm that it performs the expected action.
-
----
-
-# Persistent Pairing
-
-The application explicitly saves btferret's pairing information after a successful Bluetooth connection.
-
-It also uses a fixed BLE random address.
-
-Both are important for reconnection.
-
-After pairing, **do not casually change the fixed BLE random address in `tv_remote.py`**. The TV associates the saved Bluetooth relationship with the peripheral's identity.
-
-Changing that identity may require the Pi to be paired again.
-
-Once pairing information has been saved, the Android TV device should be able to recognize the remote again after the Raspberry Pi reboots.
-
----
-
-# Automatic Startup
-
-Once manual operation and reconnection have been verified, install the systemd service.
-
-Copy it:
-
-```bash
-sudo cp /opt/accessible-tv-remote/tv-remote.service /etc/systemd/system/
-```
-
-Reload systemd:
-
-```bash
-sudo systemctl daemon-reload
-```
-
-Enable automatic startup:
-
-```bash
-sudo systemctl enable tv-remote.service
-```
-
-Start it:
-
-```bash
-sudo systemctl start tv-remote.service
-```
-
-Check its status:
-
-```bash
-sudo systemctl status tv-remote.service
-```
-
-The service should report:
-
-```text
-Active: active (running)
-```
-
-To follow the application's log:
-
-```bash
-sudo journalctl -u tv-remote.service -f
-```
-
-To inspect the log from the current boot:
-
-```bash
-sudo journalctl -u tv-remote.service -b --no-pager
-```
-
----
-
-# Important Bluetooth Note
-
-btferret accesses the Bluetooth adapter at a relatively low level and monopolizes the adapter while running.
-
-Do not attempt to run multiple btferret-based applications against the same Bluetooth controller simultaneously.
-
-For example, do not run:
-
-```text
-tv_remote.py
-```
-
-and btferret's:
-
-```text
-keyboard.py
-```
-
-at the same time.
-
-During development we also found that immediately terminating and relaunching a btferret application could occasionally leave the Bluetooth controller unavailable.
-
-The supplied systemd service therefore starts the application once during boot rather than continuously attempting rapid process restarts.
-
-If the Bluetooth controller becomes unavailable during development, a Raspberry Pi reboot provides a clean controller reset:
-
-```bash
-sudo reboot
-```
-
----
-
-# Changing Button Actions
-
-The button mappings are defined near the beginning of `tv_remote.py`:
-
-```python
-SEQUENCES = {
-    25: ["1", "5", "7"],
-    24: ["6", "8"],
-    23: ["6", "9"],
-    27: ["1", "5"],
-    26: ["0", "0", "0"],
-}
-```
-
-For example:
-
-```python
-24: ["6", "8"]
-```
-
-means:
-
-```text
-GPIO 24 pressed
-       ↓
-send "6"
-       ↓
-send "8"
-```
-
-The key sequences can therefore be changed without modifying the Bluetooth implementation.
-
----
-
-# Troubleshooting
-
-### `ModuleNotFoundError: No module named 'btfpy'`
-
-Verify that:
-
-```text
-btfpy.so
-```
-
-exists in:
-
-```text
-/opt/accessible-tv-remote/
-```
-
-If it does not, build btferret and copy the resulting module again.
-
-### `No root permission or Bluetooth (hci0) is off or crashed`
-
-Make sure the program is being run with:
-
-```bash
-sudo python3 tv_remote.py
-```
-
-Also make sure another btferret process is not already using the adapter.
-
-Check with:
-
-```bash
-pgrep -af 'tv_remote.py|keyboard.py|btferret'
-```
-
-### `Unable to read local board address`
-
-Check that the Bluetooth address in `keyboard.txt` matches the Raspberry Pi's controller address:
-
-```bash
-bluetoothctl show
-```
-
-Also verify that another btferret process is not already holding the adapter.
-
-### TV does not reconnect after reboot
-
-First confirm that the TV successfully paired and that the application previously reported:
-
-```text
-Bluetooth pairing information saved.
-```
-
-Do not change the fixed BLE random address after pairing.
-
-If necessary, forget the HID device from the TV, pair it again, allow the pairing information to be saved, and then perform a controlled Raspberry Pi reboot.
-
----
-
-# Credits
-
-Bluetooth functionality is based on **btferret**, developed by petzval:
-
-https://github.com/petzval/btferret
-
-btferret provides the Bluetooth library and HID keyboard implementation on which this project is based.
-
-This project adds the application-specific GPIO controls, key-sequence handling, accessibility interface, pairing persistence and systemd integration.
+The previous implementation is retained during the migration in `tv_remote.py`, `keyboard.txt`, `tv-remote.service`, and `wiring/`. Its Raspberry Pi and btferret installation instructions are no longer the build instructions for this ESP32-C3 firmware.
 
 ## License
 
-btferret is distributed under the MIT License.
-
-Code derived from btferret remains subject to the upstream copyright and MIT license notice.
-
-This repository's original code is also released under the MIT License. See `LICENSE` for details.
+See [LICENSE](LICENSE).

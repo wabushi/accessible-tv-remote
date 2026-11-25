@@ -1,0 +1,12 @@
+{
+  "name": "LunaTV",
+  "short_name": "LunaTV",
+  "description": "LunaTV accessible remote control.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#101820",
+  "theme_color": "#101820",
+  "icons": [
+    { "src": "/Icon.png", "sizes": "1159x1159", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
