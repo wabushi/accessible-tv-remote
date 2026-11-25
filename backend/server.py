@@ -17,7 +17,9 @@ PORT = int(os.environ.get("TV_REMOTE_PORT", "8080"))
 VALID_KEYS = {"UP", "DOWN", "LEFT", "RIGHT", "ENTER", "BACK", "BACK_XIAOMI", *(str(n) for n in range(10))}
 queues = {}
 DEVICE_FILE = Path(__file__).resolve().parent / "devices.json"
+RECORDING_FILE = Path(__file__).resolve().parent / "recording.json"
 devices = {}
+recorded_actions = []
 lock = threading.Lock()
 queue_changed = threading.Condition(lock)
 playback_lock = threading.Lock()
@@ -30,6 +32,22 @@ try:
         devices.update({key: value for key, value in saved_devices.items()
                         if isinstance(key, str) and isinstance(value, dict)})
 except (OSError, json.JSONDecodeError):
+    pass
+
+try:
+    saved_recording = json.loads(RECORDING_FILE.read_text())
+    if isinstance(saved_recording, list):
+        recorded_actions = [
+            {"device_id": action["device_id"], "key": action["key"]}
+            for action in saved_recording
+            if isinstance(action, dict)
+            and isinstance(action.get("device_id"), str)
+            and isinstance(action.get("key"), str)
+            and action["key"] in VALID_KEYS
+            and len(action["device_id"]) <= 31
+            and all(c.isascii() and (c.isalnum() or c in "-_") for c in action["device_id"])
+        ][:100]
+except (OSError, json.JSONDecodeError, KeyError):
     pass
 
 
@@ -45,6 +63,12 @@ def save_devices_locked():
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def save_recording_locked():
+    temporary = RECORDING_FILE.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(recorded_actions, indent=2) + "\n")
+    os.replace(temporary, RECORDING_FILE)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -79,6 +103,10 @@ class Handler(BaseHTTPRequestHandler):
                            "online": now - record.get("last_seen", 0) < 4}
                           for device_id, record in sorted(devices.items(), key=lambda item: item[1].get("name", item[0]).casefold())]
             return self.send_json(200, {"devices": result})
+        if path == "/api/recording":
+            with lock:
+                actions = list(recorded_actions)
+            return self.send_json(200, {"commands": actions})
         if not (WEB_ROOT / "index.html").is_file():
             return self.send_json(503, {"error": "web app not built; run npm --prefix backend/web run build"})
         relative = "index.html" if path == "/" else path.lstrip("/")
@@ -104,6 +132,31 @@ class Handler(BaseHTTPRequestHandler):
         body = self.read_json()
         if not isinstance(body, dict):
             return self.send_json(400, {"error": "expected a JSON object"})
+        if path == "/api/recording":
+            actions = body.get("commands")
+            if not isinstance(actions, list) or len(actions) > 100:
+                return self.send_json(400, {"error": "commands must be a list of at most 100 actions"})
+            validated = []
+            for index, action in enumerate(actions, start=1):
+                if not isinstance(action, dict):
+                    return self.send_json(400, {"error": f"action {index} must be an object"})
+                target, key = action.get("device_id"), action.get("key")
+                if (not isinstance(target, str) or not target or len(target) > 31
+                        or not all(c.isascii() and (c.isalnum() or c in "-_") for c in target)):
+                    return self.send_json(400, {"error": f"invalid device_id in action {index}"})
+                if not isinstance(key, str) or key not in VALID_KEYS:
+                    return self.send_json(400, {"error": f"unsupported key in action {index}"})
+                validated.append({"device_id": target, "key": key})
+            global recorded_actions
+            with lock:
+                recorded_actions = validated
+                try:
+                    save_recording_locked()
+                except OSError as error:
+                    print(f"Could not save recording to {RECORDING_FILE}: {error}")
+                    return self.send_json(500, {"error": "could not save recording"})
+            return self.send_json(200, {"saved": len(validated)})
+
         device_id = body.get("device_id")
         if path != "/api/playback" and (
             not isinstance(device_id, str) or not device_id or len(device_id) > 31
@@ -198,6 +251,6 @@ def play_recording(actions):
 
 
 if __name__ == "__main__":
-    print(f"LunaTV server listening on http://{HOST}:{PORT}")
+    print(f"AbuelaTV server listening on http://{HOST}:{PORT}")
     print("Open this address in a browser on your network.")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()

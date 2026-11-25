@@ -5,6 +5,7 @@ sdkconfig.old
 backend/web/node_modules/
 backend/web/dist/
 backend/devices.json
+backend/recording.json
 
 __pycache__/
 *.py[cod]

@@ -31,17 +31,44 @@ function App() {
   const [devices, setDevices] = React.useState([]);
   const [selectedDeviceId, setSelectedDeviceId] = React.useState('');
   const [recording, setRecording] = React.useState(false);
-  const [recordedActions, setRecordedActions] = React.useState(() => {
-    try {
-      const saved = JSON.parse(window.localStorage.getItem('lunatv-recording') || '[]');
-      return Array.isArray(saved) ? saved.filter((action) => action && typeof action.device_id === 'string' && typeof action.key === 'string') : [];
-    } catch { return []; }
-  });
+  const [recordedActions, setRecordedActions] = React.useState([]);
+  const [recordingLoaded, setRecordingLoaded] = React.useState(false);
+  const recordingReady = React.useRef(false);
   const [happySeconds, setHappySeconds] = React.useState(0);
   const happyLocked = React.useRef(false);
 
   React.useEffect(() => {
-    window.localStorage.setItem('lunatv-recording', JSON.stringify(recordedActions));
+    let active = true;
+    fetch('/api/recording')
+      .then(async (response) => {
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'Could not load recording');
+        if (active) {
+          setRecordedActions(Array.isArray(result.commands) ? result.commands : []);
+          recordingReady.current = true;
+          setRecordingLoaded(true);
+        }
+      })
+      .catch((error) => {
+        if (active) setStatus((current) => current.kind === 'error' ? current : { text: `Could not load recording: ${error.message}`, kind: 'error' });
+      });
+    return () => { active = false; };
+  }, []);
+
+  React.useEffect(() => {
+    if (!recordingReady.current) return undefined;
+    const timer = window.setTimeout(() => {
+      fetch('/api/recording', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ commands: recordedActions }),
+      }).then((response) => {
+        if (!response.ok) throw new Error('Could not save recording');
+      }).catch((error) => {
+        setStatus((current) => current.kind === 'error' ? current : { text: error.message, kind: 'error' });
+      });
+    }, 200);
+    return () => window.clearTimeout(timer);
   }, [recordedActions]);
 
   React.useEffect(() => {
@@ -108,7 +135,7 @@ function App() {
   }
 
   async function playRecording() {
-    if (happyLocked.current || !recordedActions.length) return;
+    if (happyLocked.current || !recordingLoaded || !recordedActions.length) return;
     happyLocked.current = true;
     setHappySeconds(60);
     setStatus({ text: `Playing ${recordedActions.length} recorded actions`, kind: 'busy' });
@@ -181,7 +208,7 @@ function App() {
                   {command.symbol}
                 </RemoteButton>
               ))}
-              <button type="button" className={`record-button${recording ? ' is-recording' : ''}`} onClick={toggleRecording} aria-pressed={recording}>
+              <button type="button" className={`record-button${recording ? ' is-recording' : ''}`} onClick={toggleRecording} aria-pressed={recording} disabled={!recordingLoaded || remoteDisabled}>
                 <span className="record-dot" aria-hidden="true" />{recording ? 'Stop' : 'Record'}
                 <span className="recording-count">{recordedActions.length} {recordedActions.length === 1 ? 'action' : 'actions'}</span>
               </button>
@@ -205,7 +232,7 @@ function App() {
         </section>
 
         <section className="happy-section" aria-label="Happy button">
-        <button type="button" className="happy-button" aria-label={happySeconds ? `Playing recording, ${happySeconds} seconds remaining` : 'Play recorded actions'} onClick={playRecording} disabled={happySeconds > 0 || !recordedActions.length}>
+        <button type="button" className="happy-button" aria-label={happySeconds ? `Playing recording, ${happySeconds} seconds remaining` : 'Play recorded actions'} onClick={playRecording} disabled={!recordingLoaded || happySeconds > 0 || !recordedActions.length}>
           <img src="/Happy.png" alt="Happy" />
           {happySeconds > 0 && <span className="happy-timer" aria-hidden="true">
             <svg viewBox="0 0 100 100"><circle className="timer-track" cx="50" cy="50" r="45" /><circle className="timer-progress" cx="50" cy="50" r="45" style={{ strokeDashoffset: `${283 * (1 - happySeconds / 60)}` }} /></svg>

@@ -19,7 +19,7 @@ body { margin: 0; min-width: 320px; min-height: 100vh; min-height: 100dvh; }
 button { font: inherit; }
 .remote-shell { --pad-size: min(calc(69vw + 46px), 31dvh, 316px); width: min(100%, 440px); min-height: 100vh; min-height: 100dvh; margin: 0 auto; padding: max(16px, env(safe-area-inset-top)) 26px max(16px, env(safe-area-inset-bottom)); }
 .device-header { margin: 0 0 14px; }
-.device-tabs { display: flex; gap: 8px; overflow-x: auto; padding: 3px 2px 8px; scrollbar-width: thin; }
+.device-tabs { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; padding: 3px 2px 8px; }
 .device-tab { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 9px; min-height: 42px; max-width: 80vw; padding: 0 15px; border: 1px solid #30404b; border-radius: 999px; background: #151f27; color: #c4cdd2; font: inherit; font-size: .88rem; font-weight: 700; cursor: pointer; touch-action: manipulation; transition: transform .08s ease, background .12s ease, border-color .12s ease, color .12s ease; }
 .device-tab:hover { border-color: #536673; background: var(--surface-raised); }
 .device-tab:active { transform: scale(.96); }
