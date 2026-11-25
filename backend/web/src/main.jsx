@@ -35,6 +35,7 @@ function App() {
   const [recordingLoaded, setRecordingLoaded] = React.useState(false);
   const recordingReady = React.useRef(false);
   const [happySeconds, setHappySeconds] = React.useState(0);
+  const [confirmAction, setConfirmAction] = React.useState(null);
   const happyLocked = React.useRef(false);
 
   React.useEffect(() => {
@@ -80,6 +81,15 @@ function App() {
   React.useEffect(() => {
     if (happySeconds === 0) happyLocked.current = false;
   }, [happySeconds]);
+
+  React.useEffect(() => {
+    if (!confirmAction) return undefined;
+    function closeOnEscape(event) {
+      if (event.key === 'Escape') setConfirmAction(null);
+    }
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [confirmAction]);
 
   React.useEffect(() => {
     let active = true;
@@ -208,7 +218,7 @@ function App() {
                   {command.symbol}
                 </RemoteButton>
               ))}
-              <button type="button" className={`record-button${recording ? ' is-recording' : ''}`} onClick={toggleRecording} aria-pressed={recording} disabled={!recordingLoaded || remoteDisabled}>
+              <button type="button" className={`record-button${recording ? ' is-recording' : ''}`} onClick={() => setConfirmAction(recording ? 'stop-recording' : 'start-recording')} aria-pressed={recording} disabled={!recordingLoaded || remoteDisabled}>
                 <span className="record-dot" aria-hidden="true" />{recording ? 'Stop' : 'Record'}
                 <span className="recording-count">{recordedActions.length} {recordedActions.length === 1 ? 'action' : 'actions'}</span>
               </button>
@@ -232,7 +242,7 @@ function App() {
         </section>
 
         <section className="happy-section" aria-label="Happy button">
-        <button type="button" className="happy-button" aria-label={happySeconds ? `Playing recording, ${happySeconds} seconds remaining` : 'Play recorded actions'} onClick={playRecording} disabled={!recordingLoaded || happySeconds > 0 || !recordedActions.length}>
+        <button type="button" className="happy-button" aria-label={happySeconds ? `Playing recording, ${happySeconds} seconds remaining` : 'Play recorded actions'} onClick={() => setConfirmAction('playback')} disabled={!recordingLoaded || happySeconds > 0 || !recordedActions.length}>
           <img src="/Happy.png" alt="Happy" />
           {happySeconds > 0 && <span className="happy-timer" aria-hidden="true">
             <svg viewBox="0 0 100 100"><circle className="timer-track" cx="50" cy="50" r="45" /><circle className="timer-progress" cx="50" cy="50" r="45" style={{ strokeDashoffset: `${283 * (1 - happySeconds / 60)}` }} /></svg>
@@ -241,6 +251,27 @@ function App() {
         </button>
         </section>
       </section>
+      {confirmAction && (
+        <div className="confirm-backdrop" onClick={(event) => { if (event.target === event.currentTarget) setConfirmAction(null); }}>
+          <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+            <h2 id="confirm-title"><img className="confirm-title-image" src="/Cena.png" alt="Are you sure about that?" /></h2>
+            <p>{confirmAction === 'playback'
+              ? `Play the ${recordedActions.length} recorded ${recordedActions.length === 1 ? 'action' : 'actions'} now?`
+              : confirmAction === 'start-recording'
+                ? 'Start recording actions from both remotes? This will replace the current recording.'
+                : 'Stop recording and save the actions captured so far?'}</p>
+            <div className="confirm-actions">
+              <button type="button" className="confirm-cancel" autoFocus onClick={() => setConfirmAction(null)}>Cancel</button>
+              <button type="button" className="confirm-yes" onClick={() => {
+                const action = confirmAction;
+                setConfirmAction(null);
+                if (action === 'playback') playRecording();
+                else toggleRecording();
+              }}>{confirmAction === 'playback' ? 'Yes, play' : confirmAction === 'start-recording' ? 'Start recording' : 'Stop and save'}</button>
+            </div>
+          </section>
+        </div>
+      )}
       {sending && <span className="sr-only">Sending command</span>}
     </main>
   );
