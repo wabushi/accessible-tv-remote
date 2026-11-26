@@ -5,6 +5,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from mimetypes import guess_type
+import hashlib
 import ipaddress
 import json
 import os
@@ -17,13 +18,24 @@ from urllib.parse import unquote, urlsplit
 HOST = os.environ.get("TV_REMOTE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("TV_REMOTE_PORT", "8080"))
 KEYS_FILE = Path(__file__).resolve().parent / "keys.json"
-# Keys the web app and firmware have always had; keys.json can add more (or override these).
+# Keys the web app has always had; keys.json can add more (or override these).
 CORE_KEYS = {"UP": 0x52, "DOWN": 0x51, "LEFT": 0x50, "RIGHT": 0x4F, "ENTER": 0x28,
              "BACK": 0x29, "BACK_XIAOMI": 0xF1, "0": 0x27,
              **{str(n): 0x1E + n - 1 for n in range(1, 10)}}
-HID_PAGES = {"keyboard": 0xF1, "consumer": 0x3FF}   # page -> highest usage the firmware's HID report map supports
-RAW_KEY_RE = re.compile(r"(KB|CC):([0-9A-Fa-f]{1,4})\Z")
-_keys_cache = {"mtime": None, "catalog": {}}
+
+# The server owns everything Bluetooth-specific; the ESP32 only forwards raw HID reports.
+# Report ids of the HID report map in DEFAULT_PROFILE (and of the firmware's built-in copy of it).
+REPORT_IDS = {"keyboard": 1, "consumer": 2, "system": 3}
+HID_PAGES = {"keyboard": 0xFF, "consumer": 0xFFFF, "system": 0xFF}   # page -> highest usage the report fields hold
+RAW_PREFIX = {"KB": "keyboard", "CC": "consumer", "SC": "system"}
+PAGE_PREFIX = {page: prefix for prefix, page in RAW_PREFIX.items()}
+RAW_KEY_RE = re.compile(r"(KB|CC|SC):([0-9A-Fa-f]{1,4})\Z")
+MAX_REPORT_BYTES = 64
+DEFAULT_PROFILE = {
+    "vid": 0x2717, "pid": 0x32B8,   # Xiaomi Bluetooth Remote 2 Pro, so a Xiaomi TV applies its own key layout
+    "report_map": bytes([0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x85, 0x01, 0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x95, 0x01, 0x75, 0x08, 0x81, 0x03, 0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x05, 0x07, 0x19, 0x00, 0x2A, 0xFF, 0x00, 0x81, 0x00, 0xC0, 0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01, 0x85, 0x02, 0x15, 0x00, 0x27, 0xFF, 0xFF, 0x00, 0x00, 0x19, 0x00, 0x2B, 0xFF, 0xFF, 0x00, 0x00, 0x75, 0x10, 0x95, 0x01, 0x81, 0x00, 0xC0, 0x05, 0x01, 0x09, 0x80, 0xA1, 0x01, 0x85, 0x03, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x19, 0x00, 0x29, 0xFF, 0x75, 0x08, 0x95, 0x01, 0x81, 0x00, 0xC0]),
+}
+_keys_cache = {"mtime": None, "catalog": {}, "profile": None}
 
 
 def _parse_hid(entry):
@@ -39,20 +51,74 @@ def _parse_hid(entry):
     return {"page": hid["page"], "usage": usage}
 
 
-def key_catalog():
-    """Return {key: {"key", "label", "symbol", "group", "hid"}}, re-reading keys.json when it changes."""
+def reports_for_hid(hid):
+    """Raw HID reports for one key press; the firmware sends each, waits hold_ms, then sends zeros (release)."""
+    page, usage = hid["page"], hid["usage"]
+    if page == "keyboard":
+        data = bytes([0, 0, usage, 0, 0, 0, 0, 0])
+    elif page == "consumer":
+        data = usage.to_bytes(2, "little")
+    else:
+        data = bytes([usage])
+    return [{"id": REPORT_IDS[page], "data": data.hex(), "hold_ms": 50}]
+
+
+def _parse_reports(value):
+    """Validate explicit raw reports from keys.json: [{"id": 1-255, "data": "hex", "hold_ms": 10-2000}]."""
+    if not isinstance(value, list) or not 1 <= len(value) <= 16:
+        return None
+    reports = []
+    for item in value:
+        if not isinstance(item, dict):
+            return None
+        report_id, data, hold = item.get("id"), item.get("data"), item.get("hold_ms", 50)
+        if (isinstance(report_id, bool) or not isinstance(report_id, int) or not 1 <= report_id <= 255
+                or not isinstance(data, str) or not data or len(data) % 2 or len(data) > 2 * MAX_REPORT_BYTES
+                or isinstance(hold, bool) or not isinstance(hold, int) or not 10 <= hold <= 2000):
+            return None
+        try:
+            bytes.fromhex(data)
+        except ValueError:
+            return None
+        reports.append({"id": report_id, "data": data.lower(), "hold_ms": hold})
+    return reports
+
+
+def _build_profile(override):
+    profile = dict(DEFAULT_PROFILE)
+    if isinstance(override, dict):
+        try:
+            vid, pid = int(override.get("vid", profile["vid"]), 0), int(override.get("pid", profile["pid"]), 0)
+            report_map = bytes.fromhex(override["report_map_hex"]) if "report_map_hex" in override else profile["report_map"]
+            if not (1 <= vid <= 0xFFFF and 1 <= pid <= 0xFFFF and 8 <= len(report_map) <= 512):
+                raise ValueError("out of range")
+            profile.update(vid=vid, pid=pid, report_map=report_map)
+        except (ValueError, TypeError):
+            print(f"Ignoring invalid 'profile' in {KEYS_FILE}")
+    fingerprint = f"{profile['vid']}:{profile['pid']}:{profile['report_map'].hex()}".encode()
+    return {"rev": hashlib.sha256(fingerprint).hexdigest()[:12], "vid": profile["vid"], "pid": profile["pid"],
+            "report_map": profile["report_map"].hex()}
+
+
+def _load_keys():
+    """Re-read keys.json when it changes; refreshes both the key catalog and the Bluetooth profile."""
     try:
         mtime = KEYS_FILE.stat().st_mtime_ns
     except OSError:
         mtime = None
     if _keys_cache["mtime"] == mtime and _keys_cache["catalog"]:
-        return _keys_cache["catalog"]
+        return
     catalog = {name: {"key": name, "label": name, "symbol": "", "group": "core",
-                      "hid": {"page": "keyboard", "usage": usage}} for name, usage in CORE_KEYS.items()}
+                      "reports": reports_for_hid({"page": "keyboard", "usage": usage}), "variants": []}
+               for name, usage in CORE_KEYS.items()}
+    data = {}
     try:
-        for entry in json.loads(KEYS_FILE.read_text())["keys"]:
-            name, hid = entry.get("key"), _parse_hid(entry)
-            if not isinstance(name, str) or not name or len(name) > 32 or hid is None:
+        data = json.loads(KEYS_FILE.read_text())
+        for entry in data["keys"]:
+            name = entry.get("key")
+            hid = _parse_hid(entry)
+            reports = reports_for_hid(hid) if hid else _parse_reports(entry.get("reports"))
+            if not isinstance(name, str) or not name or len(name) > 32 or reports is None:
                 print(f"Ignoring invalid entry in {KEYS_FILE}: {entry!r}")
                 continue
             variants = []
@@ -61,42 +127,50 @@ def key_catalog():
                 if variant_hid is None:
                     print(f"Ignoring invalid variant of {name} in {KEYS_FILE}: {variant!r}")
                     continue
-                prefix = "KB" if variant_hid["page"] == "keyboard" else "CC"
                 variants.append({"label": str(variant.get("label", ""))[:40],
-                                 "key": f"{prefix}:{variant_hid['usage']:X}"})
+                                 "key": f"{PAGE_PREFIX[variant_hid['page']]}:{variant_hid['usage']:X}"})
             catalog[name] = {"key": name, "label": str(entry.get("label", name))[:32],
                              "symbol": str(entry.get("symbol", ""))[:8],
-                             "group": str(entry.get("group", "extra"))[:16], "hid": hid,
+                             "group": str(entry.get("group", "extra"))[:16], "reports": reports,
                              "variants": variants}
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
         if mtime is not None:
             print(f"Could not read {KEYS_FILE}: {error}")
-    _keys_cache.update(mtime=mtime, catalog=catalog)
-    return catalog
+    _keys_cache.update(mtime=mtime, catalog=catalog,
+                       profile=_build_profile(data.get("profile") if isinstance(data, dict) else None))
 
 
-def hid_for(key):
-    """HID description sent to the ESP32 for a key name, or None if unknown."""
+def key_catalog():
+    _load_keys()
+    return _keys_cache["catalog"]
+
+
+def current_profile():
+    _load_keys()
+    return _keys_cache["profile"]
+
+
+def reports_for(key):
+    """Raw HID reports for a key name (or raw "KB:4A" / "CC:223" / "SC:81"), or None if unknown."""
     if not isinstance(key, str):
         return None
     entry = key_catalog().get(key)
     if entry:
-        return entry["hid"]
-    match = RAW_KEY_RE.match(key)   # raw "KB:4A" / "CC:223" for ad-hoc usages
+        return entry["reports"]
+    match = RAW_KEY_RE.match(key)
     if match:
-        page = "keyboard" if match.group(1) == "KB" else "consumer"
-        usage = int(match.group(2), 16)
-        if 1 <= usage <= HID_PAGES[page]:
-            return {"page": page, "usage": usage}
+        hid = {"page": RAW_PREFIX[match.group(1)], "usage": int(match.group(2), 16)}
+        if 1 <= hid["usage"] <= HID_PAGES[hid["page"]]:
+            return reports_for_hid(hid)
     return None
 
 
 def valid_key(key):
-    return hid_for(key) is not None
+    return reports_for(key) is not None
 
 
 def make_command(key):
-    return {"id": uuid.uuid4().hex, "key": key, "hid": hid_for(key)}
+    return {"id": uuid.uuid4().hex, "key": key, "reports": reports_for(key)}
 
 
 queues = {}
@@ -229,7 +303,7 @@ class Handler(BaseHTTPRequestHandler):
                           for device_id, record in sorted(devices.items(), key=lambda item: item[1].get("name", item[0]).casefold())]
             return self.send_json(200, {"devices": result})
         if path == "/api/keys":
-            extras = [{k: v for k, v in entry.items() if k != "hid"}
+            extras = [{k: entry[k] for k in ("key", "label", "symbol", "group", "variants")}
                       for entry in key_catalog().values() if entry["group"] != "core"]
             return self.send_json(200, {"keys": extras})
         if path == "/api/recording":
@@ -362,7 +436,13 @@ class Handler(BaseHTTPRequestHandler):
                 if change and wifi_status_locked(device_id)["status"] == "pending" and secure_transport(self):
                     wifi_payload = {"id": change["id"], "ssid": change["ssid"], "password": change["password"]}
                     change.update(status="delivered", password=None, updated=time.time())
-            return self.send_json(200, {"command": command, "wifi": wifi_payload})
+            profile_payload = None
+            reported_rev = body.get("profile_rev")
+            if isinstance(reported_rev, str):   # firmware that accepts a server-pushed Bluetooth profile
+                profile = current_profile()
+                if reported_rev != profile["rev"] and body.get("profile_failed") != profile["rev"]:
+                    profile_payload = profile
+            return self.send_json(200, {"command": command, "wifi": wifi_payload, "profile": profile_payload})
 
         if path == "/api/wifi":
             ssid, password = body.get("ssid"), body.get("password", "")

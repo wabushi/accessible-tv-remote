@@ -30,9 +30,10 @@
 #define COOLDOWN_US 2000000LL
 #define KEY_DELAY_MS 150
 #define KEY_REPORT_ID 1
-#define CONSUMER_REPORT_ID 2
 #define POLL_INTERVAL_MS 700
 #define HID_KEY_ESCAPE 0x29
+#define XIAOMI_REMOTE_VID 0x2717
+#define XIAOMI_REMOTE_PID 0x32B8
 
 #define HID_KEY_0 0x27
 #define HID_KEY_1 0x1E
@@ -65,28 +66,34 @@ static const button_config_t buttons[BUTTON_COUNT] = {
     { GPIO_NUM_4, seq_000, sizeof(seq_000) },
 };
 
+/* Built-in default Bluetooth profile, used until (and unless) the server pushes one. It mirrors DEFAULT_PROFILE in
+ * backend/server.py. After that the profile comes from the server and is kept in NVS, so reports, usages and the USB
+ * vendor/product ID can all change without reflashing. */
 static const uint8_t keyboard_report_map[] = {
-    0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x85, KEY_REPORT_ID,
-    0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01,
-    0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
-    0x95, 0x01, 0x75, 0x08, 0x81, 0x03,
-    /* Extend the array to include Xiaomi's reported keyboard-page Back usage 0xF1. */
-    0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x26, 0xF1, 0x00,
-    0x05, 0x07, 0x19, 0x00, 0x2A, 0xF1, 0x00, 0x81, 0x00, 0xC0,
-    /* Consumer Control (Home, Menu, volume, media...): one 16-bit usage 0x000-0x3FF. */
-    0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01, 0x85, CONSUMER_REPORT_ID,
-    0x15, 0x00, 0x26, 0xFF, 0x03, 0x19, 0x00, 0x2A, 0xFF, 0x03,
-    0x75, 0x10, 0x95, 0x01, 0x81, 0x00, 0xC0,
+    /* keyboard, report id 1 */
+    0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x85, 0x01, 0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x95, 0x01, 0x75, 0x08, 0x81, 0x03, 0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x05, 0x07, 0x19, 0x00, 0x2A, 0xFF, 0x00, 0x81, 0x00, 0xC0,
+    /* consumer control, report id 2 */
+    0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01, 0x85, 0x02, 0x15, 0x00, 0x27, 0xFF, 0xFF, 0x00, 0x00, 0x19, 0x00, 0x2B, 0xFF, 0xFF, 0x00, 0x00, 0x75, 0x10, 0x95, 0x01, 0x81, 0x00, 0xC0,
+    /* system control, report id 3 */
+    0x05, 0x01, 0x09, 0x80, 0xA1, 0x01, 0x85, 0x03, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x19, 0x00, 0x29, 0xFF, 0x75, 0x08, 0x95, 0x01, 0x81, 0x00, 0xC0,
 };
 static esp_hid_raw_report_map_t report_maps[] = {
     { .data = keyboard_report_map, .len = sizeof(keyboard_report_map) },
 };
+#define PROFILE_MAP_MAX 512
+#define PROFILE_MAX_BOOT_TRIES 3
+static uint8_t profile_map[PROFILE_MAP_MAX];
+static uint16_t profile_vid = XIAOMI_REMOTE_VID;
+static uint16_t profile_pid = XIAOMI_REMOTE_PID;
+static char profile_rev[17] = "builtin";
+static char profile_failed[17];        /* rev of a stored profile that kept crashing at boot */
+static bool profile_stored_in_use;     /* running a profile loaded from NVS, not yet proven stable */
 static char ble_name[32];
 static char device_id[32];
 static char backend_url[256];
 static esp_hidd_dev_t *hid_device;
 static int64_t last_press_us;
-static char http_response[768];
+static char http_response[2048];
 static size_t http_response_len;
 static EventGroupHandle_t wifi_events;
 #define WIFI_HAS_IP BIT0
@@ -181,16 +188,6 @@ static esp_err_t send_key(uint8_t usage)
     return esp_hidd_dev_input_set(hid_device, 0, KEY_REPORT_ID, report, sizeof(report));
 }
 
-static esp_err_t send_consumer(uint16_t usage)
-{
-    uint8_t report[2] = { (uint8_t)(usage & 0xFF), (uint8_t)(usage >> 8) };
-    esp_err_t err = esp_hidd_dev_input_set(hid_device, 0, CONSUMER_REPORT_ID, report, sizeof(report));
-    if (err != ESP_OK) return err;
-    vTaskDelay(pdMS_TO_TICKS(50));
-    report[0] = report[1] = 0;
-    return esp_hidd_dev_input_set(hid_device, 0, CONSUMER_REPORT_ID, report, sizeof(report));
-}
-
 static esp_err_t http_event_handler(esp_http_client_event_t *event)
 {
     if (event->event_id == HTTP_EVENT_ON_DATA && event->data && event->data_len > 0) {
@@ -234,49 +231,131 @@ static bool post_json(const char *path, const char *payload, char *response, siz
     return ok;
 }
 
-typedef struct {
-    bool consumer;     /* true: Consumer Control usage, false: Keyboard-page usage */
-    uint16_t usage;    /* 0 = unknown command */
-} hid_command_t;
+/* ---- Raw HID reports -------------------------------------------------------------------------------------
+ * The server decides what every key means. A command carries {"reports":[{"id":N,"data":"hex","hold_ms":M}]}; the
+ * firmware just sends each report, waits hold_ms, sends an all-zero release of the same length, and moves on. */
+#define MAX_REPORT_BYTES 64
 
-/* Fallback for a server that sends only a key name (no "hid" object): core keyboard keys. */
-static hid_command_t legacy_command_key(const char *command)
+static int hex_nibble(char c)
 {
-    hid_command_t result = {0};
-    if (!strcmp(command, "UP")) result.usage = 0x52;
-    else if (!strcmp(command, "DOWN")) result.usage = 0x51;
-    else if (!strcmp(command, "LEFT")) result.usage = 0x50;
-    else if (!strcmp(command, "RIGHT")) result.usage = 0x4F;
-    else if (!strcmp(command, "ENTER")) result.usage = 0x28;
-    else if (!strcmp(command, "BACK")) result.usage = HID_KEY_ESCAPE;
-    else if (!strcmp(command, "BACK_XIAOMI")) result.usage = 0xF1;
-    else if (command[0] >= '0' && command[0] <= '9' && command[1] == '\0')
-        result.usage = command[0] == '0' ? HID_KEY_0 : (uint8_t)(HID_KEY_1 + command[0] - '1');
-    return result;
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
 }
 
-/* The server owns the key definitions: each command carries {"hid":{"page":"keyboard"|"consumer","usage":N}}.
- * New keys therefore need only a server change, never a firmware reflash. */
-static hid_command_t resolve_command(const cJSON *command, const char *name)
+static int hex_decode(const char *hex, uint8_t *out, size_t max)
 {
-    hid_command_t result = {0};
-    const cJSON *hid = cJSON_GetObjectItemCaseSensitive((cJSON *)command, "hid");
-    if (cJSON_IsObject(hid)) {
-        const cJSON *page = cJSON_GetObjectItemCaseSensitive((cJSON *)hid, "page");
-        const cJSON *usage = cJSON_GetObjectItemCaseSensitive((cJSON *)hid, "usage");
-        if (cJSON_IsString(page) && cJSON_IsNumber(usage)) {
-            bool consumer = !strcmp(page->valuestring, "consumer");
-            bool keyboard = !strcmp(page->valuestring, "keyboard");
-            double value = usage->valuedouble;
-            /* Limits match the HID report map: keyboard usages 1-0xF1, consumer usages 1-0x3FF. */
-            if ((keyboard && value >= 1 && value <= 0xF1) || (consumer && value >= 1 && value <= 0x3FF)) {
-                result.consumer = consumer;
-                result.usage = (uint16_t)value;
-            }
-        }
-        return result;
+    size_t length = strlen(hex);
+    if (length == 0 || (length % 2) != 0 || length / 2 > max) return -1;
+    for (size_t i = 0; i < length / 2; ++i) {
+        int high = hex_nibble(hex[2 * i]), low = hex_nibble(hex[2 * i + 1]);
+        if (high < 0 || low < 0) return -1;
+        out[i] = (uint8_t)((high << 4) | low);
     }
-    return legacy_command_key(name);
+    return (int)(length / 2);
+}
+
+static bool send_reports(cJSON *reports)
+{
+    if (!cJSON_IsArray(reports) || !esp_hidd_dev_connected(hid_device)) return false;
+    cJSON *item;
+    cJSON_ArrayForEach(item, reports) {
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(item, "id");
+        const cJSON *data = cJSON_GetObjectItemCaseSensitive(item, "data");
+        const cJSON *hold = cJSON_GetObjectItemCaseSensitive(item, "hold_ms");
+        uint8_t report[MAX_REPORT_BYTES];
+        int length = cJSON_IsString(data) ? hex_decode(data->valuestring, report, sizeof(report)) : -1;
+        if (!cJSON_IsNumber(id) || id->valueint < 1 || id->valueint > 255 || length < 0) return false;
+        int hold_ms = cJSON_IsNumber(hold) ? hold->valueint : 50;
+        if (hold_ms < 10) hold_ms = 10;
+        if (hold_ms > 2000) hold_ms = 2000;
+        if (esp_hidd_dev_input_set(hid_device, 0, (size_t)id->valueint, report, (size_t)length) != ESP_OK) return false;
+        vTaskDelay(pdMS_TO_TICKS(hold_ms));
+        memset(report, 0, (size_t)length);
+        if (esp_hidd_dev_input_set(hid_device, 0, (size_t)id->valueint, report, (size_t)length) != ESP_OK) return false;
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+    return true;
+}
+
+/* ---- Server-pushed Bluetooth profile ---------------------------------------------------------------------
+ * {"rev","vid","pid","report_map"(hex)} is stored in NVS and applied at the next boot (the HID report map can only be
+ * set while the HID device is created). A stored profile that crashes the board is dropped after
+ * PROFILE_MAX_BOOT_TRIES boots and reported to the server so it does not push the same revision again. */
+static void load_profile(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open("tv_remote", NVS_READWRITE, &nvs) != ESP_OK) return;
+    uint8_t tries = 0;
+    nvs_get_u8(nvs, "p_try", &tries);
+    char rev[sizeof(profile_rev)] = {0};
+    size_t rev_len = sizeof(rev), map_len = sizeof(profile_map);
+    uint16_t vid = 0, pid = 0;
+    bool valid = nvs_get_str(nvs, "p_rev", rev, &rev_len) == ESP_OK &&
+                 nvs_get_u16(nvs, "p_vid", &vid) == ESP_OK && nvs_get_u16(nvs, "p_pid", &pid) == ESP_OK &&
+                 nvs_get_blob(nvs, "p_map", profile_map, &map_len) == ESP_OK && map_len >= 8 && vid && pid;
+    if (valid && tries >= PROFILE_MAX_BOOT_TRIES) {
+        ESP_LOGE(TAG, "Stored Bluetooth profile %s failed %d boots; falling back to the built-in profile", rev, tries);
+        strlcpy(profile_failed, rev, sizeof(profile_failed));
+        nvs_erase_key(nvs, "p_rev");
+        nvs_set_u8(nvs, "p_try", 0);
+        nvs_commit(nvs);
+        valid = false;
+    } else if (valid) {
+        nvs_set_u8(nvs, "p_try", (uint8_t)(tries + 1));
+        nvs_commit(nvs);
+        strlcpy(profile_rev, rev, sizeof(profile_rev));
+        profile_vid = vid;
+        profile_pid = pid;
+        report_maps[0].data = profile_map;
+        report_maps[0].len = map_len;
+        profile_stored_in_use = true;
+        ESP_LOGI(TAG, "Using stored Bluetooth profile %s (VID 0x%04X PID 0x%04X, %u byte report map)", rev, vid, pid, (unsigned)map_len);
+    }
+    nvs_close(nvs);
+}
+
+static void confirm_profile(void)   /* the stored profile ran long enough to be trusted */
+{
+    nvs_handle_t nvs;
+    if (nvs_open("tv_remote", NVS_READWRITE, &nvs) != ESP_OK) return;
+    nvs_set_u8(nvs, "p_try", 0);
+    nvs_commit(nvs);
+    nvs_close(nvs);
+}
+
+static void apply_profile(const cJSON *profile)
+{
+    const cJSON *rev = cJSON_GetObjectItemCaseSensitive((cJSON *)profile, "rev");
+    const cJSON *vid = cJSON_GetObjectItemCaseSensitive((cJSON *)profile, "vid");
+    const cJSON *pid = cJSON_GetObjectItemCaseSensitive((cJSON *)profile, "pid");
+    const cJSON *map = cJSON_GetObjectItemCaseSensitive((cJSON *)profile, "report_map");
+    uint8_t decoded[PROFILE_MAP_MAX];
+    int map_len = cJSON_IsString(map) ? hex_decode(map->valuestring, decoded, sizeof(decoded)) : -1;
+    if (!cJSON_IsString(rev) || strlen(rev->valuestring) < 1 || strlen(rev->valuestring) >= sizeof(profile_rev) ||
+        !cJSON_IsNumber(vid) || vid->valueint < 1 || vid->valueint > 0xFFFF ||
+        !cJSON_IsNumber(pid) || pid->valueint < 1 || pid->valueint > 0xFFFF || map_len < 8) {
+        ESP_LOGW(TAG, "Ignoring invalid Bluetooth profile from the server");
+        return;
+    }
+    if (!strcmp(rev->valuestring, profile_rev)) return;
+    nvs_handle_t nvs;
+    if (nvs_open("tv_remote", NVS_READWRITE, &nvs) != ESP_OK) return;
+    esp_err_t err = nvs_set_str(nvs, "p_rev", rev->valuestring);
+    if (err == ESP_OK) err = nvs_set_u16(nvs, "p_vid", (uint16_t)vid->valueint);
+    if (err == ESP_OK) err = nvs_set_u16(nvs, "p_pid", (uint16_t)pid->valueint);
+    if (err == ESP_OK) err = nvs_set_blob(nvs, "p_map", decoded, (size_t)map_len);
+    if (err == ESP_OK) err = nvs_set_u8(nvs, "p_try", 0);
+    if (err == ESP_OK) err = nvs_commit(nvs);
+    nvs_close(nvs);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Could not store Bluetooth profile: %s", esp_err_to_name(err));
+        return;
+    }
+    ESP_LOGW(TAG, "Received Bluetooth profile %s; restarting to apply it", rev->valuestring);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
 }
 
 /* Wi-Fi change requested from the web UI ("wifi" object in the poll response). */
@@ -340,30 +419,27 @@ static void backend_task(void *arg)
                      device_id, wifi_result_id, wifi_result_ok ? "true" : "false");
             if (post_json("/api/wifi/result", result, NULL, 0)) wifi_result_id[0] = '\0';
         }
-        char response[sizeof(http_response)];
-        char poll[160];
-        snprintf(poll, sizeof(poll), "{\"device_id\":\"%s\",\"name\":\"%s\"}", device_id, ble_name);
-        if (post_json("/api/poll", poll, response, sizeof(response))) {
+        char poll[256];
+        int poll_len = snprintf(poll, sizeof(poll), "{\"device_id\":\"%s\",\"name\":\"%s\",\"profile_rev\":\"%s\"",
+                                device_id, ble_name, profile_rev);
+        if (profile_failed[0] && poll_len > 0 && poll_len < (int)sizeof(poll))
+            poll_len += snprintf(poll + poll_len, sizeof(poll) - (size_t)poll_len, ",\"profile_failed\":\"%s\"", profile_failed);
+        if (poll_len > 0 && poll_len < (int)sizeof(poll) - 2) strlcpy(poll + poll_len, "}", sizeof(poll) - (size_t)poll_len);
+        if (post_json("/api/poll", poll, NULL, 0)) {
             if (!registered) {
                 ESP_LOGI(TAG, "Registered with backend as %s", device_id);
                 registered = true;
             }
-            cJSON *root = cJSON_Parse(response);
+            cJSON *root = cJSON_Parse(http_response);   /* cJSON copies the strings, so later requests may reuse the buffer */
             cJSON *command = root ? cJSON_GetObjectItemCaseSensitive(root, "command") : NULL;
             if (cJSON_IsObject(command)) {
                 cJSON *id = cJSON_GetObjectItemCaseSensitive(command, "id");
-                cJSON *name = cJSON_GetObjectItemCaseSensitive(command, "key");
-                if (cJSON_IsString(id) && cJSON_IsString(name)) {
-                    hid_command_t hid = resolve_command(command, name->valuestring);
-                    bool sent = hid.usage && esp_hidd_dev_connected(hid_device) &&
-                                (hid.consumer ? send_consumer(hid.usage) : send_key((uint8_t)hid.usage)) == ESP_OK;
-                    if (sent) {
-                        char ack[192];
-                        snprintf(ack, sizeof(ack), "{\"device_id\":\"%s\",\"command_id\":\"%s\"}", device_id, id->valuestring);
-                        post_json("/api/ack", ack, NULL, 0);
-                    } else {
-                        ESP_LOGW(TAG, "Unknown key command or BLE send failed");
-                    }
+                if (cJSON_IsString(id) && send_reports(cJSON_GetObjectItemCaseSensitive(command, "reports"))) {
+                    char ack[192];
+                    snprintf(ack, sizeof(ack), "{\"device_id\":\"%s\",\"command_id\":\"%s\"}", device_id, id->valuestring);
+                    post_json("/api/ack", ack, NULL, 0);
+                } else if (cJSON_IsString(id)) {
+                    ESP_LOGW(TAG, "Command not sent (no BLE host connected, or invalid reports)");
                 }
             }
             const cJSON *wifi = root ? cJSON_GetObjectItemCaseSensitive(root, "wifi") : NULL;
@@ -381,6 +457,8 @@ static void backend_task(void *arg)
                                      apply_wifi_change(ssid->valuestring, password->valuestring);
                 }
             }
+            const cJSON *profile = root ? cJSON_GetObjectItemCaseSensitive(root, "profile") : NULL;
+            if (cJSON_IsObject(profile)) apply_profile(profile);
             cJSON_Delete(root);
         }
         vTaskDelay(pdMS_TO_TICKS(POLL_INTERVAL_MS));
@@ -425,9 +503,12 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_hid_ble_gap_adv_init(ESP_HID_APPEARANCE_KEYBOARD, ble_name));
     ESP_ERROR_CHECK(esp_ble_gatts_register_callback(esp_hidd_gatts_event_handler));
 
+    load_profile();
     esp_hid_device_config_t hid_config = {
-        .vendor_id = 0xCafe,
-        .product_id = 0x4004,
+        /* Identity and report map come from the server profile (default: Xiaomi Bluetooth Remote 2 Pro IDs
+         * 0x2717/0x32B8, so a Xiaomi TV applies its own key layout for that remote). */
+        .vendor_id = profile_vid,
+        .product_id = profile_pid,
         .version = 0x0100,
         .device_name = ble_name,
         .manufacturer_name = "Accessible TV Remote",
@@ -443,6 +524,10 @@ void app_main(void)
     ESP_LOGI(TAG, "Ready. BLE HID name: %s", ble_name);
     bool was_pressed[BUTTON_COUNT] = {0};
     while (true) {
+        if (profile_stored_in_use && esp_timer_get_time() > 20000000LL) {
+            profile_stored_in_use = false;
+            confirm_profile();
+        }
         for (size_t i = 0; i < BUTTON_COUNT; ++i) {
             bool pressed = gpio_get_level(buttons[i].gpio) == 0;
             if (pressed && !was_pressed[i]) {
