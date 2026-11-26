@@ -1,16 +1,4 @@
 {
-  "_comment": "Extra Bluetooth keys. Edit and the server picks changes up automatically (no firmware reflash). page: keyboard (usage 1-0xF1) or consumer (usage 1-0x3FF). group 'extra' shows the key in the TV controls grid; group 'pad' shows it in the top-left cell of the direction pad. Common consumer usages: Home 0x223, Menu 0x40, Volume Up 0xE9, Volume Down 0xEA, Mute 0xE2, Play/Pause 0xCD, Power 0x30, Next 0xB5, Previous 0xB6.",
-  "keys": [
-    {
-      "key": "INPUT_XIAOMI",
-      "label": "Xiaomi input",
-      "symbol": "⎘",
-      "group": "pad",
-      "hid": {
-        "page": "consumer",
-        "usage": "0xB2"
-      },
-      "_note": "Captured live on a MiTV-MOOQ0 from the original remote: Input = Consumer-page usage 0xB2 (MSC_SCAN 000c00b2, KEY_RECORD), which Xiaomi's key layout Vendor_2717_Product_32b9.kl turns into KEYCODE_TV_INPUT (178). That layout only applies when the remote advertises USB IDs 2717:32b9, so DEFAULT_PROFILE in server.py uses PID 0x32B9. The earlier candidate list was removed."
-    }
-  ]
+  "_comment": "Extra Bluetooth keys. Edit and the server picks changes up automatically (no firmware reflash). page: keyboard (usage 1-0xF1) or consumer (usage 1-0x3FF). group 'extra' shows the key in the TV controls grid; Common consumer usages: Home 0x223, Menu 0x40, Volume Up 0xE9, Volume Down 0xEA, Mute 0xE2, Play/Pause 0xCD, Power 0x30, Next 0xB5, Previous 0xB6.",
+  "keys": []
 }

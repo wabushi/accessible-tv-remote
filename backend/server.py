@@ -26,14 +26,14 @@ CORE_KEYS = {"UP": 0x52, "DOWN": 0x51, "LEFT": 0x50, "RIGHT": 0x4F, "ENTER": 0x2
 # The server owns everything Bluetooth-specific; the ESP32 only forwards raw HID reports.
 # Report ids of the HID report map in DEFAULT_PROFILE (and of the firmware's built-in copy of it).
 REPORT_IDS = {"keyboard": 1, "consumer": 2, "system": 3}
-HID_PAGES = {"keyboard": 0xFF, "consumer": 0xFFFF, "system": 0xFF}   # page -> highest usage the report fields hold
+HID_PAGES = {"keyboard": 0xFF, "consumer": 0x3FF, "system": 0xFF}   # page -> highest usage the report fields hold
 RAW_PREFIX = {"KB": "keyboard", "CC": "consumer", "SC": "system"}
 PAGE_PREFIX = {page: prefix for prefix, page in RAW_PREFIX.items()}
 RAW_KEY_RE = re.compile(r"(KB|CC|SC):([0-9A-Fa-f]{1,4})\Z")
 MAX_REPORT_BYTES = 64
 DEFAULT_PROFILE = {
     "vid": 0x2717, "pid": 0x32B9,   # the Xiaomi remote's IDs as seen on a MiTV (Vendor_2717_Product_32b9.kl), so the TV applies its own key layout
-    "report_map": bytes([0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x85, 0x01, 0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x95, 0x01, 0x75, 0x08, 0x81, 0x03, 0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x05, 0x07, 0x19, 0x00, 0x2A, 0xFF, 0x00, 0x81, 0x00, 0xC0, 0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01, 0x85, 0x02, 0x15, 0x00, 0x27, 0xFF, 0xFF, 0x00, 0x00, 0x19, 0x00, 0x2B, 0xFF, 0xFF, 0x00, 0x00, 0x75, 0x10, 0x95, 0x01, 0x81, 0x00, 0xC0, 0x05, 0x01, 0x09, 0x80, 0xA1, 0x01, 0x85, 0x03, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x19, 0x00, 0x29, 0xFF, 0x75, 0x08, 0x95, 0x01, 0x81, 0x00, 0xC0]),
+    "report_map": bytes([0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x85, 0x01, 0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x95, 0x01, 0x75, 0x08, 0x81, 0x03, 0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x05, 0x07, 0x19, 0x00, 0x2A, 0xFF, 0x00, 0x81, 0x00, 0xC0, 0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01, 0x85, 0x02, 0x15, 0x00, 0x26, 0xFF, 0x03, 0x19, 0x00, 0x2A, 0xFF, 0x03, 0x75, 0x10, 0x95, 0x01, 0x81, 0x00, 0xC0, 0x05, 0x01, 0x09, 0x80, 0xA1, 0x01, 0x85, 0x03, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x19, 0x00, 0x29, 0xFF, 0x75, 0x08, 0x95, 0x01, 0x81, 0x00, 0xC0]),
 }
 _keys_cache = {"mtime": None, "catalog": {}, "profile": None}
 
@@ -269,9 +269,25 @@ def wifi_status_locked(device_id):
     return {"status": change["status"], "ssid": change["ssid"], "error": change.get("error", "")}
 
 
+STARTED_AT = time.time()
+SLOW_REQUEST_SECONDS = 1.0
+
+
 class Handler(BaseHTTPRequestHandler):
+    # A client that stalls mid-request (flaky mobile hotspot, half-open connection) can no longer pin a thread forever.
+    timeout = 30
+
     def log_message(self, fmt, *args):
-        print(f"{self.address_string()} - {fmt % args}")
+        print(f"{self.address_string()} - {fmt % args}", flush=True)
+
+    def handle_one_request(self):
+        started = time.monotonic()
+        super().handle_one_request()
+        elapsed = time.monotonic() - started
+        if elapsed > SLOW_REQUEST_SECONDS and getattr(self, "requestline", ""):
+            # Timing includes reading the request, so a slow client shows up here too: compare with other lines.
+            print(f"SLOW {elapsed:.1f}s {self.requestline} from {self.client_address[0]} "
+                  f"(threads={threading.active_count()})", flush=True)
 
     def send_json(self, status, payload):
         data = json.dumps(payload).encode()
@@ -303,6 +319,10 @@ class Handler(BaseHTTPRequestHandler):
                            "wifi": wifi_status_locked(device_id)}
                           for device_id, record in sorted(devices.items(), key=lambda item: item[1].get("name", item[0]).casefold())]
             return self.send_json(200, {"devices": result})
+        if path == "/api/health":
+            return self.send_json(200, {"ok": True, "uptime_s": int(time.time() - STARTED_AT),
+                                        "threads": threading.active_count(), "devices": len(devices),
+                                        "queued": sum(len(q) for q in list(queues.values()))})
         if path == "/api/keys":
             extras = [{k: entry[k] for k in ("key", "label", "symbol", "group", "variants")}
                       for entry in key_catalog().values() if entry["group"] != "core"]
