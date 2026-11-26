@@ -129,3 +129,19 @@ h2 { margin: 0 0 12px 2px; color: #aeb9c0; font-size: .74rem; font-weight: 700; 
 .wifi-applied { color: #71d9a6 !important; }
 .confirm-actions button:disabled { opacity: .55; cursor: default; }
 .wifi-pending { color: #c4cdd2; }
+.interface-section { margin-bottom: 18px; padding-bottom: 16px; border-bottom: 1px solid #2b3a45; }
+.interface-label { display: block; color: #c4cdd2; font-size: .88rem; font-weight: 600; }
+.wifi-section-label { margin-bottom: 6px; }
+.interface-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.interface-option { min-height: 46px; padding: 0 10px; border: 1px solid #34444f; border-radius: 12px; background: #23313c; color: #f3f5f6; font: inherit; font-weight: 700; cursor: pointer; touch-action: manipulation; }
+.interface-option:hover { border-color: #536673; background: #2b3a45; }
+.interface-option:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.interface-option.selected { border-color: var(--accent); background: #2c3a1b; color: #e8f7b8; }
+.interface-note { margin: 8px 0 0 !important; color: #8d9aa2 !important; font-size: .78rem !important; }
+.interface-status { margin: 8px 0 0 !important; color: #c4cdd2 !important; font-size: .82rem !important; line-height: 1.4; }
+.interface-active { color: #71d9a6 !important; }
+.interface-confirm { margin-top: 10px; padding: 12px; border: 1px solid #536673; border-radius: 14px; background: #1e2c36; }
+.interface-confirm p { margin: 0 0 10px; font-size: .85rem; line-height: 1.45; }
+.interface-confirm-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.interface-confirm-actions button { min-height: 42px; padding: 0 10px; border: 1px solid #34444f; border-radius: 12px; background: #23313c; color: #f3f5f6; font: inherit; font-weight: 700; cursor: pointer; }
+.interface-confirm-actions .confirm-yes { border-color: var(--accent); background: var(--accent); color: #16200d; }

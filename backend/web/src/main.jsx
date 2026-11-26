@@ -43,6 +43,9 @@ function App() {
   const [wifiShowPassword, setWifiShowPassword] = React.useState(false);
   const [wifiSubmitting, setWifiSubmitting] = React.useState(false);
   const [wifiError, setWifiError] = React.useState('');
+  const [interfaces, setInterfaces] = React.useState([]);
+  const [interfaceError, setInterfaceError] = React.useState('');
+  const [pendingInterface, setPendingInterface] = React.useState(null);
   const happyLocked = React.useRef(false);
 
   React.useEffect(() => {
@@ -127,6 +130,7 @@ function App() {
         if (!active) return;
         const nextDevices = Array.isArray(result.devices) ? result.devices : [];
         setDevices(nextDevices);
+        if (Array.isArray(result.interfaces)) setInterfaces(result.interfaces);
         setSelectedDeviceId((current) => nextDevices.some((device) => device.device_id === current)
           ? current
           : (nextDevices[0]?.device_id || ''));
@@ -193,6 +197,8 @@ function App() {
 
   function closeWifi() {
     setWifiOpen(false);
+    setPendingInterface(null);
+    setInterfaceError('');
     setWifiSsid('');
     setWifiPassword('');       // never keep the password around after the overlay closes
     setWifiShowPassword(false);
@@ -206,6 +212,31 @@ function App() {
       setWifiError('');
     } catch (error) {
       setWifiError('Could not cancel the change');
+    }
+  }
+
+  function requestInterface(id) {
+    const current = (devices.find((device) => device.device_id === selectedDeviceId) || {}).interface || 'xiaomi';
+    setInterfaceError('');
+    setPendingInterface(id === current ? null : id);
+  }
+
+  async function chooseInterface(id) {
+    setPendingInterface(null);
+    if (!selectedDeviceId) return;
+    setInterfaceError('');
+    // show the choice immediately; the next device refresh confirms what the server saved
+    setDevices((current) => current.map((device) => device.device_id === selectedDeviceId ? { ...device, interface: id } : device));
+    try {
+      const response = await fetch('/api/interface', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_id: selectedDeviceId, interface: id }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not save the interface');
+    } catch (error) {
+      setInterfaceError(error.message);
     }
   }
 
@@ -338,7 +369,52 @@ function App() {
         return (
           <div className="confirm-backdrop" onClick={(event) => { if (event.target === event.currentTarget) closeWifi(); }}>
             <form className="confirm-dialog wifi-dialog" role="dialog" aria-modal="true" aria-labelledby="wifi-title" onSubmit={submitWifi}>
-              <h2 id="wifi-title">Wi-Fi for {selectedDevice.name || selectedDevice.device_id}</h2>
+              <h2 id="wifi-title">Settings for {selectedDevice.name || selectedDevice.device_id}</h2>
+              {interfaces.length > 0 && (
+                <div className="interface-section">
+                  <span className="interface-label" id="interface-label">Bluetooth interface</span>
+                  <div className="interface-options" role="radiogroup" aria-labelledby="interface-label">
+                    {interfaces.map((option) => (
+                      <button
+                        key={option.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={(selectedDevice.interface || 'xiaomi') === option.id}
+                        className={`interface-option${(selectedDevice.interface || 'xiaomi') === option.id ? ' selected' : ''}`}
+                        onClick={() => requestInterface(option.id)}
+                      >{option.label}</button>
+                    ))}
+                  </div>
+                  {(() => {
+                    const current = interfaces.find((option) => option.id === (selectedDevice.interface || 'xiaomi'));
+                    const target = interfaces.find((option) => option.id === pendingInterface);
+                    const state = selectedDevice.interface_state;
+                    return (
+                      <>
+                        {current && <p className="interface-note">{current.description}</p>}
+                        {target ? (
+                          <div className="interface-confirm" role="alert">
+                            <p>Switch this remote to <strong>{target.label}</strong>? It restarts once, and you must forget it on the TV or box and pair it again.</p>
+                            <div className="interface-confirm-actions">
+                              <button type="button" className="confirm-cancel" onClick={() => setPendingInterface(null)}>Keep {current ? current.label : 'current'}</button>
+                              <button type="button" className="confirm-yes" onClick={() => chooseInterface(target.id)}>Switch</button>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            {state === 'active' && <p className="interface-status interface-active" role="status">Active on this remote.</p>}
+                            {state === 'switching' && <p className="interface-status" role="status">Switching: the remote restarts when it next checks in. Then forget it on the TV or box and pair it again.</p>}
+                            {state === 'failed' && <p className="interface-status wifi-error" role="status">The remote could not apply this interface and kept its built-in one.</p>}
+                            {state === 'unknown' && <p className="interface-status" role="status">Waiting for the remote to report which interface it runs.</p>}
+                          </>
+                        )}
+                      </>
+                    );
+                  })()}
+                  {interfaceError && <p className="wifi-message wifi-error" role="alert">{interfaceError}</p>}
+                </div>
+              )}
+              <span className="interface-label wifi-section-label">Wi-Fi</span>
               <p className="wifi-help">The remote tries the new network first and keeps its current one if it cannot connect.</p>
               <label className="wifi-field">Network name
                 <input type="text" value={wifiSsid} onChange={(event) => setWifiSsid(event.target.value)} maxLength={32}

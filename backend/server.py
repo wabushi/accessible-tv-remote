@@ -145,6 +145,18 @@ def key_catalog():
     return _keys_cache["catalog"]
 
 
+def profile_for(interface):
+    """The Bluetooth profile (identity + report map) a remote on `interface` should run."""
+    base = current_profile()
+    ids = INTERFACES.get(interface) or INTERFACES[DEFAULT_INTERFACE]
+    if ids["vid"] is None:
+        return base
+    profile = dict(base, vid=ids["vid"], pid=ids["pid"])
+    fingerprint = f"{profile['vid']}:{profile['pid']}:{profile['report_map']}".encode()
+    profile["rev"] = hashlib.sha256(fingerprint).hexdigest()[:12]
+    return profile
+
+
 def current_profile():
     _load_keys()
     return _keys_cache["profile"]
@@ -177,6 +189,19 @@ queues = {}
 DEVICE_FILE = Path(__file__).resolve().parent / "devices.json"
 RECORDING_FILE = Path(__file__).resolve().parent / "recording.json"
 devices = {}
+# Bluetooth interface a remote should use. Placeholder for now: the choice is saved on the server (devices.json) and shown
+# in the web app, but both interfaces still send the same keys until the HOT Streamer's real values are captured.
+# Each interface is the Bluetooth identity a remote presents; the report map and key definitions are shared (standard
+# keyboard, consumer and system-control reports). Android picks its key layout by USB vendor/product ID:
+#   xiaomi        -> the Xiaomi remote's IDs, so a Xiaomi TV applies its own layout for that remote
+#   hot_streamer  -> neutral IDs, so a stock Android TV box falls back to its standard Generic.kl
+INTERFACES = {
+    "xiaomi": {"label": "Xiaomi", "vid": None, "pid": None,   # None: use the profile in keys.json / DEFAULT_PROFILE
+                "description": "Presents itself as the Xiaomi TV remote, so a Xiaomi TV applies its own key layout."},
+    "hot_streamer": {"label": "HOT Streamer", "vid": 0xCAFE, "pid": 0x4004,
+                     "description": "Generic Android TV keyboard; the box uses its standard key layout."},
+}
+DEFAULT_INTERFACE = "xiaomi"
 recorded_actions = []
 lock = threading.Lock()
 queue_changed = threading.Condition(lock)
@@ -273,6 +298,18 @@ STARTED_AT = time.time()
 SLOW_REQUEST_SECONDS = 1.0
 
 
+def interface_state(record):
+    """active: the remote runs the selected interface; switching: it still runs another one (it restarts once it
+    picks the change up); failed: it could not apply it; unknown: it has not reported a profile (older firmware)."""
+    target = profile_for(record.get("interface", DEFAULT_INTERFACE))["rev"]
+    if record.get("profile_failed") == target:
+        return "failed"
+    reported = record.get("profile_rev")
+    if reported is None:
+        return "unknown"
+    return "active" if reported == target else "switching"
+
+
 def wifi_view_locked(device_id, record):
     """wifi_status_locked plus `blocked`: the change is waiting but this remote only reaches us over plain HTTP,
     where passwords are never handed out, so it can never be delivered."""
@@ -326,9 +363,13 @@ class Handler(BaseHTTPRequestHandler):
                            "online": now - record.get("last_seen", 0) < 4,
                            "pending": len(queues.get(device_id, ())),
                            "secure": record.get("secure"),
+                           "interface": record.get("interface", DEFAULT_INTERFACE),
+                           "interface_state": interface_state(record),
                            "wifi": wifi_view_locked(device_id, record)}
                           for device_id, record in sorted(devices.items(), key=lambda item: item[1].get("name", item[0]).casefold())]
-            return self.send_json(200, {"devices": result})
+            return self.send_json(200, {"devices": result,
+                                        "interfaces": [{"id": key, "label": info["label"], "description": info["description"]}
+                                                       for key, info in INTERFACES.items()]})
         if path == "/api/health":
             return self.send_json(200, {"ok": True, "uptime_s": int(time.time() - STARTED_AT),
                                         "threads": threading.active_count(), "devices": len(devices),
@@ -462,7 +503,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(name, str) or not name or len(name) > 64:
                     name = device_id
                 new_device = device_id not in devices or devices[device_id].get("name") != name
-                devices[device_id] = {"name": name, "last_seen": time.time(), "secure": secure_transport(self)}
+                record = devices.setdefault(device_id, {})
+                record.update(name=name, last_seen=time.time(), secure=secure_transport(self))
+                if isinstance(body.get("profile_rev"), str):
+                    record["profile_rev"] = body["profile_rev"]
+                if isinstance(body.get("profile_failed"), str):
+                    record["profile_failed"] = body["profile_failed"]
+                else:
+                    record.pop("profile_failed", None)
+                interface = record.get("interface", DEFAULT_INTERFACE)
                 if new_device:
                     save_devices_locked()
                 pending = queues.get(device_id)
@@ -475,10 +524,28 @@ class Handler(BaseHTTPRequestHandler):
             profile_payload = None
             reported_rev = body.get("profile_rev")
             if isinstance(reported_rev, str):   # firmware that accepts a server-pushed Bluetooth profile
-                profile = current_profile()
+                profile = profile_for(interface)
                 if reported_rev != profile["rev"] and body.get("profile_failed") != profile["rev"]:
                     profile_payload = profile
             return self.send_json(200, {"command": command, "wifi": wifi_payload, "profile": profile_payload})
+
+        if path == "/api/interface":
+            choice = body.get("interface")
+            if choice not in INTERFACES:
+                return self.send_json(400, {"error": f"interface must be one of {sorted(INTERFACES)}"})
+            with lock:
+                record = devices.get(device_id)
+                if record is None:
+                    return self.send_json(404, {"error": "device not found"})
+                previous = record.get("interface")
+                record["interface"] = choice
+                if not save_devices_locked():
+                    if previous is None:
+                        record.pop("interface", None)
+                    else:
+                        record["interface"] = previous
+                    return self.send_json(500, {"error": "could not save the interface"})
+            return self.send_json(200, {"interface": choice})
 
         if path == "/api/wifi":
             ssid, password = body.get("ssid"), body.get("password", "")
