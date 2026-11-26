@@ -2,66 +2,6 @@
   "_comment": "Extra Bluetooth keys. Edit and the server picks changes up automatically (no firmware reflash). page: keyboard (usage 1-0xF1) or consumer (usage 1-0x3FF). group 'extra' shows the key in the TV controls grid; group 'pad' shows it in the top-left cell of the direction pad. Common consumer usages: Home 0x223, Menu 0x40, Volume Up 0xE9, Volume Down 0xEA, Mute 0xE2, Play/Pause 0xCD, Power 0x30, Next 0xB5, Previous 0xB6.",
   "keys": [
     {
-      "key": "HOME",
-      "label": "Home",
-      "symbol": "⌂",
-      "group": "extra",
-      "hid": {
-        "page": "consumer",
-        "usage": "0x223"
-      }
-    },
-    {
-      "key": "MENU",
-      "label": "Menu",
-      "symbol": "☰",
-      "group": "extra",
-      "hid": {
-        "page": "consumer",
-        "usage": "0x40"
-      }
-    },
-    {
-      "key": "VOL_DOWN",
-      "label": "Volume down",
-      "symbol": "🔉",
-      "group": "extra",
-      "hid": {
-        "page": "consumer",
-        "usage": "0xEA"
-      }
-    },
-    {
-      "key": "VOL_UP",
-      "label": "Volume up",
-      "symbol": "🔊",
-      "group": "extra",
-      "hid": {
-        "page": "consumer",
-        "usage": "0xE9"
-      }
-    },
-    {
-      "key": "MUTE",
-      "label": "Mute",
-      "symbol": "🔇",
-      "group": "extra",
-      "hid": {
-        "page": "consumer",
-        "usage": "0xE2"
-      }
-    },
-    {
-      "key": "PLAY_PAUSE",
-      "label": "Play or pause",
-      "symbol": "⏯",
-      "group": "extra",
-      "hid": {
-        "page": "consumer",
-        "usage": "0xCD"
-      }
-    },
-    {
       "key": "INPUT_XIAOMI",
       "label": "Xiaomi input",
       "symbol": "⎘",
