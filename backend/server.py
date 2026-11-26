@@ -56,6 +56,7 @@ def save_devices_locked():
     try:
         temporary.write_text(json.dumps(devices, indent=2) + "\n")
         os.replace(temporary, DEVICE_FILE)
+        return True
     except OSError as error:
         # Keep device polling available if the registry cannot be persisted.
         print(f"Could not save registered devices to {DEVICE_FILE}: {error}")
@@ -63,6 +64,7 @@ def save_devices_locked():
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
+        return False
 
 
 def save_recording_locked():
@@ -126,6 +128,25 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache" if target.name == "index.html" or target.name == "Icon.png" else "public, max-age=31536000, immutable")
         self.end_headers()
         self.wfile.write(data)
+
+    def do_DELETE(self):
+        path = unquote(urlsplit(self.path).path)
+        prefix = "/api/devices/"
+        if not path.startswith(prefix):
+            return self.send_json(404, {"error": "not found"})
+        device_id = path[len(prefix):]
+        if (not device_id or "/" in device_id or len(device_id) > 31
+                or not all(c.isascii() and (c.isalnum() or c in "-_") for c in device_id)):
+            return self.send_json(400, {"error": "invalid device_id"})
+        with lock:
+            record = devices.pop(device_id, None)
+            if record is None:
+                return self.send_json(404, {"error": "device not found"})
+            if not save_devices_locked():
+                devices[device_id] = record
+                return self.send_json(500, {"error": "could not save device registry"})
+            queues.pop(device_id, None)
+        return self.send_json(200, {"deleted": True, "device_id": device_id})
 
     def do_POST(self):
         path = unquote(urlsplit(self.path).path)

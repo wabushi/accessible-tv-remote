@@ -4,7 +4,7 @@ Firmware for an accessible physical remote built around an ESP32-C3. The device 
 
 ## Current migration scope
 
-This branch ports the existing physical button mappings to ESP32-C3 firmware and adds a Wi-Fi command path. The device advertises as a BLE keyboard, polls the backend using outbound HTTP POST requests, and sends received commands to its paired host as key presses.
+This branch ports the existing physical button mappings to ESP32-C3 firmware and adds a Wi-Fi command path. The device advertises as a BLE keyboard, polls the backend using outbound HTTP or HTTPS POST requests, and sends received commands to its paired host as key presses.
 
 | Button | Original Pi BCM pin | ESP32-C3 sample GPIO | Keyboard sequence |
 |---|---:|---:|---|
@@ -36,7 +36,7 @@ npm --prefix backend/web run build
 python3 backend/server.py
 ```
 
-Open `http://<server-address>:8080/` in a browser. Each ESP32 registers on its first poll and appears as a selectable tab; the tab's green dot indicates that the device has polled recently. Commands are queued separately for the selected device. The browser provides arrows, OK/Enter, Back, and digits 0–9. `backend/devices.json` stores registered device names across server restarts and is generated locally. `backend/Icon.png` is used for the page, browser favicon, touch icon, and installed-app icon. The browser queues a key with `POST /api/commands`; each ESP32 polls `POST /api/poll` every 700 ms and acknowledges a key at `POST /api/ack` after sending it. Command queues are in memory and cleared if the server restarts. Provision the same backend base URL (for example, `http://192.168.1.20:8080`) on each board when flashing. This firmware currently uses plain HTTP, which exposes commands to anyone on the network path; use it only on a trusted network. Before using a remote server, configure TLS certificate validation in the firmware. This starter server has no login or command authentication and is intended for a trusted network during development.
+Open `https://<server-host>/` when the server is behind HTTPS (or `http://<server-address>:8080/` on a trusted local network). Each ESP32 registers on its first successful poll and appears as a selectable tab; the tab's green dot indicates that the device has polled recently. Commands are queued separately for the selected device. The browser provides arrows, OK/Enter, Back, and digits 0–9. `backend/devices.json` stores registered device names across server restarts and is generated locally. Delete a registration with `DELETE /api/devices/<device_id>`; this removes it from the in-memory and persisted registry, and returns 404 if it is not registered. The browser queues a key with `POST /api/commands`; each ESP32 polls `POST /api/poll` every 700 ms and acknowledges a key at `POST /api/ack` after sending it. Command queues are in memory and cleared if the server restarts. Provision the server's base URL when flashing each board. The current firmware validates HTTPS certificates using ESP-IDF's certificate bundle. Rebuild and reflash boards running older firmware before using an HTTPS URL; otherwise their polls can fail TLS validation and they will not register. The server has no login or command authentication, so use an appropriately protected network and deployment.
 
 The code uses sample GPIO assignments shown below; verify the pinout and strapping pins for the specific board before wiring. GPIO assignment can be changed in `main/main.c`.
 

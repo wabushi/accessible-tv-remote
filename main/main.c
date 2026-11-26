@@ -12,6 +12,7 @@
 #include "esp_hidd.h"
 #include "esp_hidd_gatts.h"
 #include "esp_http_client.h"
+#include "esp_crt_bundle.h"
 #include "cJSON.h"
 #include "esp_hid_gap.h"
 #include "esp_log.h"
@@ -193,6 +194,7 @@ static bool post_json(const char *path, const char *payload, char *response, siz
         .event_handler = http_event_handler,
         .timeout_ms = 5000,
         .buffer_size = 512,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) return false;
