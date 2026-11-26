@@ -85,7 +85,7 @@ h2 { margin: 0 0 12px 2px; color: #aeb9c0; font-size: .74rem; font-weight: 700; 
 .happy-button:disabled { cursor: default; }
 .happy-button:disabled:active { transform: none; }
 .happy-button:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
-.happy-button img { display: block; width: 88%; height: 88%; object-fit: contain; object-position: center; }
+.happy-button img { display: block; width: 76%; height: 76%; object-fit: contain; object-position: center; }
 .happy-timer { position: absolute; inset: 0; display: grid; place-items: center; background: #0b1718a8; }
 .happy-timer svg { position: absolute; inset: 8%; width: 84%; height: 84%; overflow: visible; transform: rotate(-90deg); }
 .timer-track, .timer-progress { fill: none; stroke-width: 5; }

@@ -20,6 +20,7 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 #include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -81,6 +82,8 @@ static esp_hidd_dev_t *hid_device;
 static int64_t last_press_us;
 static char http_response[512];
 static size_t http_response_len;
+static EventGroupHandle_t wifi_events;
+#define WIFI_HAS_IP BIT0
 
 static esp_err_t load_settings(wifi_config_t *wifi)
 {
@@ -118,11 +121,13 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        xEventGroupClearBits(wifi_events, WIFI_HAS_IP);
         ESP_LOGW(TAG, "Wi-Fi disconnected; retrying");
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = data;
         ESP_LOGI(TAG, "Wi-Fi connected, IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        xEventGroupSetBits(wifi_events, WIFI_HAS_IP);
     }
 }
 
@@ -228,11 +233,17 @@ static uint8_t command_key(const char *command)
 static void backend_task(void *arg)
 {
     (void)arg;
+    bool registered = false;
     while (true) {
+        xEventGroupWaitBits(wifi_events, WIFI_HAS_IP, pdFALSE, pdTRUE, portMAX_DELAY);
         char response[sizeof(http_response)];
-        char poll[96];
-        snprintf(poll, sizeof(poll), "{\"device_id\":\"%s\"}", device_id);
+        char poll[160];
+        snprintf(poll, sizeof(poll), "{\"device_id\":\"%s\",\"name\":\"%s\"}", device_id, ble_name);
         if (post_json("/api/poll", poll, response, sizeof(response))) {
+            if (!registered) {
+                ESP_LOGI(TAG, "Registered with backend as %s", device_id);
+                registered = true;
+            }
             cJSON *root = cJSON_Parse(response);
             cJSON *command = root ? cJSON_GetObjectItemCaseSensitive(root, "command") : NULL;
             if (cJSON_IsObject(command)) {
@@ -286,6 +297,8 @@ void app_main(void)
         return;
     }
 
+    wifi_events = xEventGroupCreate();
+    if (!wifi_events) ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     start_wifi(&wifi);
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
     ESP_ERROR_CHECK(esp_hid_gap_init(HIDD_BLE_MODE));
