@@ -33,7 +33,7 @@
 #define POLL_INTERVAL_MS 700
 #define HID_KEY_ESCAPE 0x29
 #define XIAOMI_REMOTE_VID 0x2717
-#define XIAOMI_REMOTE_PID 0x32B8
+#define XIAOMI_REMOTE_PID 0x32B9
 
 #define HID_KEY_0 0x27
 #define HID_KEY_1 0x1E
@@ -506,7 +506,7 @@ void app_main(void)
     load_profile();
     esp_hid_device_config_t hid_config = {
         /* Identity and report map come from the server profile (default: Xiaomi Bluetooth Remote 2 Pro IDs
-         * 0x2717/0x32B8, so a Xiaomi TV applies its own key layout for that remote). */
+         * 0x2717/0x32B9, so a Xiaomi TV applies its own key layout for that remote). */
         .vendor_id = profile_vid,
         .product_id = profile_pid,
         .version = 0x0100,
