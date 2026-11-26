@@ -5,8 +5,10 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from mimetypes import guess_type
+import ipaddress
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -14,7 +16,79 @@ from urllib.parse import unquote, urlsplit
 
 HOST = os.environ.get("TV_REMOTE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("TV_REMOTE_PORT", "8080"))
-VALID_KEYS = {"UP", "DOWN", "LEFT", "RIGHT", "ENTER", "BACK", "BACK_XIAOMI", *(str(n) for n in range(10))}
+KEYS_FILE = Path(__file__).resolve().parent / "keys.json"
+# Keys the web app and firmware have always had; keys.json can add more (or override these).
+CORE_KEYS = {"UP": 0x52, "DOWN": 0x51, "LEFT": 0x50, "RIGHT": 0x4F, "ENTER": 0x28,
+             "BACK": 0x29, "BACK_XIAOMI": 0xF1, "0": 0x27,
+             **{str(n): 0x1E + n - 1 for n in range(1, 10)}}
+HID_PAGES = {"keyboard": 0xF1, "consumer": 0x3FF}   # page -> highest usage the firmware's HID report map supports
+RAW_KEY_RE = re.compile(r"(KB|CC):([0-9A-Fa-f]{1,4})\Z")
+_keys_cache = {"mtime": None, "catalog": {}}
+
+
+def _parse_hid(entry):
+    hid = entry.get("hid") if isinstance(entry, dict) else None
+    if not isinstance(hid, dict) or hid.get("page") not in HID_PAGES:
+        return None
+    try:
+        usage = int(hid.get("usage"), 0) if isinstance(hid.get("usage"), str) else hid.get("usage")
+    except ValueError:
+        return None
+    if isinstance(usage, bool) or not isinstance(usage, int) or not 1 <= usage <= HID_PAGES[hid["page"]]:
+        return None
+    return {"page": hid["page"], "usage": usage}
+
+
+def key_catalog():
+    """Return {key: {"key", "label", "symbol", "group", "hid"}}, re-reading keys.json when it changes."""
+    try:
+        mtime = KEYS_FILE.stat().st_mtime_ns
+    except OSError:
+        mtime = None
+    if _keys_cache["mtime"] == mtime and _keys_cache["catalog"]:
+        return _keys_cache["catalog"]
+    catalog = {name: {"key": name, "label": name, "symbol": "", "group": "core",
+                      "hid": {"page": "keyboard", "usage": usage}} for name, usage in CORE_KEYS.items()}
+    try:
+        for entry in json.loads(KEYS_FILE.read_text())["keys"]:
+            name, hid = entry.get("key"), _parse_hid(entry)
+            if not isinstance(name, str) or not name or len(name) > 32 or hid is None:
+                print(f"Ignoring invalid entry in {KEYS_FILE}: {entry!r}")
+                continue
+            catalog[name] = {"key": name, "label": str(entry.get("label", name))[:32],
+                             "symbol": str(entry.get("symbol", ""))[:8],
+                             "group": str(entry.get("group", "extra"))[:16], "hid": hid}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        if mtime is not None:
+            print(f"Could not read {KEYS_FILE}: {error}")
+    _keys_cache.update(mtime=mtime, catalog=catalog)
+    return catalog
+
+
+def hid_for(key):
+    """HID description sent to the ESP32 for a key name, or None if unknown."""
+    if not isinstance(key, str):
+        return None
+    entry = key_catalog().get(key)
+    if entry:
+        return entry["hid"]
+    match = RAW_KEY_RE.match(key)   # raw "KB:4A" / "CC:223" for ad-hoc usages
+    if match:
+        page = "keyboard" if match.group(1) == "KB" else "consumer"
+        usage = int(match.group(2), 16)
+        if 1 <= usage <= HID_PAGES[page]:
+            return {"page": page, "usage": usage}
+    return None
+
+
+def valid_key(key):
+    return hid_for(key) is not None
+
+
+def make_command(key):
+    return {"id": uuid.uuid4().hex, "key": key, "hid": hid_for(key)}
+
+
 queues = {}
 DEVICE_FILE = Path(__file__).resolve().parent / "devices.json"
 RECORDING_FILE = Path(__file__).resolve().parent / "recording.json"
@@ -43,7 +117,7 @@ try:
             if isinstance(action, dict)
             and isinstance(action.get("device_id"), str)
             and isinstance(action.get("key"), str)
-            and action["key"] in VALID_KEYS
+            and valid_key(action["key"])
             and len(action["device_id"]) <= 31
             and all(c.isascii() and (c.isalnum() or c in "-_") for c in action["device_id"])
         ][:100]
@@ -71,6 +145,44 @@ def save_recording_locked():
     temporary = RECORDING_FILE.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(recorded_actions, indent=2) + "\n")
     os.replace(temporary, RECORDING_FILE)
+
+
+# Wi-Fi changes requested from the web UI. In memory only, never persisted: the password is handed to the
+# ESP32 exactly once (on its next poll) and then wiped; it is never returned by any GET.
+WIFI_PENDING_TTL = 600     # seconds a change may wait for the remote to come online and poll
+WIFI_RESULT_TTL = 90       # seconds the remote has to report back after the change was delivered
+wifi_changes = {}          # device_id -> {id, ssid, password|None, status, error, updated}
+
+
+def secure_transport(handler):
+    """True when the request did not cross an untrusted network in plain text.
+
+    Behind a reverse proxy that means X-Forwarded-Proto: https (the proxy must set it itself).
+    Without a proxy header, only direct connections from loopback/private (LAN) addresses count.
+    """
+    if handler.headers.get("X-Forwarded-Proto", "").lower() == "https":
+        return True
+    if handler.headers.get("X-Forwarded-For") or handler.headers.get("X-Real-IP"):
+        return False
+    try:
+        return ipaddress.ip_address(handler.client_address[0]).is_private
+    except ValueError:
+        return False
+
+
+def wifi_status_locked(device_id):
+    """Public view of a device's Wi-Fi change (never includes the password); expires stale entries."""
+    change = wifi_changes.get(device_id)
+    if not change:
+        return None
+    age = time.time() - change["updated"]
+    if change["status"] == "pending" and age > WIFI_PENDING_TTL:
+        change.update(status="failed", password=None, updated=time.time(),
+                      error="The remote did not come online in time. Try again.")
+    elif change["status"] == "delivered" and age > WIFI_RESULT_TTL:
+        change.update(status="failed", updated=time.time(),
+                      error="The remote did not report back. It may still be on its old network; try again.")
+    return {"status": change["status"], "ssid": change["ssid"], "error": change.get("error", "")}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -102,9 +214,14 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 result = [{"device_id": device_id,
                            "name": record.get("name", device_id),
-                           "online": now - record.get("last_seen", 0) < 4}
+                           "online": now - record.get("last_seen", 0) < 4,
+                           "wifi": wifi_status_locked(device_id)}
                           for device_id, record in sorted(devices.items(), key=lambda item: item[1].get("name", item[0]).casefold())]
             return self.send_json(200, {"devices": result})
+        if path == "/api/keys":
+            extras = [{k: v for k, v in entry.items() if k != "hid"}
+                      for entry in key_catalog().values() if entry["group"] != "core"]
+            return self.send_json(200, {"keys": extras})
         if path == "/api/recording":
             with lock:
                 actions = list(recorded_actions)
@@ -165,7 +282,7 @@ class Handler(BaseHTTPRequestHandler):
                 if (not isinstance(target, str) or not target or len(target) > 31
                         or not all(c.isascii() and (c.isalnum() or c in "-_") for c in target)):
                     return self.send_json(400, {"error": f"invalid device_id in action {index}"})
-                if not isinstance(key, str) or key not in VALID_KEYS:
+                if not valid_key(key):
                     return self.send_json(400, {"error": f"unsupported key in action {index}"})
                 validated.append({"device_id": target, "key": key})
             global recorded_actions
@@ -187,9 +304,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/commands":
             key = body.get("key")
-            if not isinstance(key, str) or key not in VALID_KEYS:
+            if not valid_key(key):
                 return self.send_json(400, {"error": "unsupported key"})
-            command = {"id": uuid.uuid4().hex, "key": key}
+            command = make_command(key)
             with lock:
                 queues.setdefault(device_id, deque()).append(command)
                 queue_changed.notify_all()
@@ -208,7 +325,7 @@ class Handler(BaseHTTPRequestHandler):
                 if (not isinstance(target, str) or not target or len(target) > 31
                         or not all(c.isascii() and (c.isalnum() or c in "-_") for c in target)):
                     return self.send_json(400, {"error": f"invalid device_id in action {index}: {target!r}"})
-                if not isinstance(key, str) or key not in VALID_KEYS:
+                if not valid_key(key):
                     return self.send_json(400, {"error": f"unsupported key in action {index}"})
                 validated.append({"device_id": target, "key": key})
             global playback_active
@@ -230,7 +347,41 @@ class Handler(BaseHTTPRequestHandler):
                     save_devices_locked()
                 pending = queues.get(device_id)
                 command = pending[0] if pending else None
-            return self.send_json(200, {"command": command})
+                wifi_payload = None
+                change = wifi_changes.get(device_id)
+                if change and wifi_status_locked(device_id)["status"] == "pending" and secure_transport(self):
+                    wifi_payload = {"id": change["id"], "ssid": change["ssid"], "password": change["password"]}
+                    change.update(status="delivered", password=None, updated=time.time())
+            return self.send_json(200, {"command": command, "wifi": wifi_payload})
+
+        if path == "/api/wifi":
+            ssid, password = body.get("ssid"), body.get("password", "")
+            if not secure_transport(self):
+                return self.send_json(403, {"error": "Wi-Fi settings can only be changed over HTTPS or a trusted local network"})
+            if (not isinstance(ssid, str) or not 1 <= len(ssid.encode()) <= 32
+                    or any(ord(c) < 32 or ord(c) == 127 for c in ssid)):
+                return self.send_json(400, {"error": "Network name must be 1-32 bytes"})
+            if (not isinstance(password, str) or (password and not 8 <= len(password.encode()) <= 63)
+                    or any(ord(c) < 32 or ord(c) == 127 for c in password)):
+                return self.send_json(400, {"error": "Password must be empty (open network) or 8-63 characters"})
+            with lock:
+                if device_id not in devices:
+                    return self.send_json(404, {"error": "device not found"})
+                wifi_changes[device_id] = {"id": uuid.uuid4().hex[:16], "ssid": ssid, "password": password,
+                                           "status": "pending", "error": "", "updated": time.time()}
+            return self.send_json(202, {"queued": True})
+
+        if path == "/api/wifi/result":
+            change_id, ok = body.get("change_id"), body.get("ok")
+            with lock:
+                change = wifi_changes.get(device_id)
+                if change and change["id"] == change_id and change["status"] in ("pending", "delivered"):
+                    if ok is True:
+                        change.update(status="applied", error="")
+                    else:
+                        change.update(status="failed", error="The remote could not join that network, so it kept its previous one.")
+                    change.update(password=None, updated=time.time())
+            return self.send_json(200, {"recorded": True})
 
         if path == "/api/ack":
             command_id = body.get("command_id")
@@ -249,7 +400,7 @@ def play_recording(actions):
     global playback_active
     try:
         for action in actions:
-            command = {"id": uuid.uuid4().hex, "key": action["key"]}
+            command = make_command(action["key"])
             deadline = time.monotonic() + 20
             with queue_changed:
                 queue = queues.setdefault(action["device_id"], deque())

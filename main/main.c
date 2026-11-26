@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "driver/gpio.h"
@@ -29,6 +30,7 @@
 #define COOLDOWN_US 2000000LL
 #define KEY_DELAY_MS 150
 #define KEY_REPORT_ID 1
+#define CONSUMER_REPORT_ID 2
 #define POLL_INTERVAL_MS 700
 #define HID_KEY_ESCAPE 0x29
 
@@ -71,6 +73,10 @@ static const uint8_t keyboard_report_map[] = {
     /* Extend the array to include Xiaomi's reported keyboard-page Back usage 0xF1. */
     0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x26, 0xF1, 0x00,
     0x05, 0x07, 0x19, 0x00, 0x2A, 0xF1, 0x00, 0x81, 0x00, 0xC0,
+    /* Consumer Control (Home, Menu, volume, media...): one 16-bit usage 0x000-0x3FF. */
+    0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01, 0x85, CONSUMER_REPORT_ID,
+    0x15, 0x00, 0x26, 0xFF, 0x03, 0x19, 0x00, 0x2A, 0xFF, 0x03,
+    0x75, 0x10, 0x95, 0x01, 0x81, 0x00, 0xC0,
 };
 static esp_hid_raw_report_map_t report_maps[] = {
     { .data = keyboard_report_map, .len = sizeof(keyboard_report_map) },
@@ -80,7 +86,7 @@ static char device_id[32];
 static char backend_url[256];
 static esp_hidd_dev_t *hid_device;
 static int64_t last_press_us;
-static char http_response[512];
+static char http_response[768];
 static size_t http_response_len;
 static EventGroupHandle_t wifi_events;
 #define WIFI_HAS_IP BIT0
@@ -175,6 +181,16 @@ static esp_err_t send_key(uint8_t usage)
     return esp_hidd_dev_input_set(hid_device, 0, KEY_REPORT_ID, report, sizeof(report));
 }
 
+static esp_err_t send_consumer(uint16_t usage)
+{
+    uint8_t report[2] = { (uint8_t)(usage & 0xFF), (uint8_t)(usage >> 8) };
+    esp_err_t err = esp_hidd_dev_input_set(hid_device, 0, CONSUMER_REPORT_ID, report, sizeof(report));
+    if (err != ESP_OK) return err;
+    vTaskDelay(pdMS_TO_TICKS(50));
+    report[0] = report[1] = 0;
+    return esp_hidd_dev_input_set(hid_device, 0, CONSUMER_REPORT_ID, report, sizeof(report));
+}
+
 static esp_err_t http_event_handler(esp_http_client_event_t *event)
 {
     if (event->event_id == HTTP_EVENT_ON_DATA && event->data && event->data_len > 0) {
@@ -209,27 +225,108 @@ static bool post_json(const char *path, const char *payload, char *response, siz
     int status = esp_http_client_get_status_code(client);
     bool ok = err == ESP_OK && status >= 200 && status < 300;
     if (ok && response && response_size > 0) strlcpy(response, http_response, response_size);
-    if (!ok) ESP_LOGW(TAG, "Backend request %s failed: %s (HTTP %d)", path, esp_err_to_name(err), status);
+    if (!ok) {
+        ESP_LOGW(TAG, "Backend request %s failed: %s (HTTP %d)", path, esp_err_to_name(err), status);
+        if (http_response_len > 0) ESP_LOGW(TAG, "Response body: %.200s", http_response);
+        if (http_response_len > 200) ESP_LOGW(TAG, "Body cont: %.320s", http_response + 200);
+    }
     esp_http_client_cleanup(client);
     return ok;
 }
 
-static uint8_t command_key(const char *command)
+typedef struct {
+    bool consumer;     /* true: Consumer Control usage, false: Keyboard-page usage */
+    uint16_t usage;    /* 0 = unknown command */
+} hid_command_t;
+
+/* Fallback for a server that sends only a key name (no "hid" object): core keyboard keys. */
+static hid_command_t legacy_command_key(const char *command)
 {
-    if (!strcmp(command, "UP")) return 0x52;
-    if (!strcmp(command, "DOWN")) return 0x51;
-    if (!strcmp(command, "LEFT")) return 0x50;
-    if (!strcmp(command, "RIGHT")) return 0x4F;
-    if (!strcmp(command, "ENTER")) return 0x28;
-    /* TVs commonly map the standard keyboard Escape key to Back. */
-    if (!strcmp(command, "BACK")) return HID_KEY_ESCAPE;
-    /* Community HID captures report Xiaomi Remote 2 Pro Back as Keyboard usage 0xF1. */
-    if (!strcmp(command, "BACK_XIAOMI")) return 0xF1;
-    if (command[0] >= '0' && command[0] <= '9' && command[1] == '\0')
-        return command[0] == '0' ? HID_KEY_0 : (uint8_t)(HID_KEY_1 + command[0] - '1');
-    return 0;
+    hid_command_t result = {0};
+    if (!strcmp(command, "UP")) result.usage = 0x52;
+    else if (!strcmp(command, "DOWN")) result.usage = 0x51;
+    else if (!strcmp(command, "LEFT")) result.usage = 0x50;
+    else if (!strcmp(command, "RIGHT")) result.usage = 0x4F;
+    else if (!strcmp(command, "ENTER")) result.usage = 0x28;
+    else if (!strcmp(command, "BACK")) result.usage = HID_KEY_ESCAPE;
+    else if (!strcmp(command, "BACK_XIAOMI")) result.usage = 0xF1;
+    else if (command[0] >= '0' && command[0] <= '9' && command[1] == '\0')
+        result.usage = command[0] == '0' ? HID_KEY_0 : (uint8_t)(HID_KEY_1 + command[0] - '1');
+    return result;
 }
 
+/* The server owns the key definitions: each command carries {"hid":{"page":"keyboard"|"consumer","usage":N}}.
+ * New keys therefore need only a server change, never a firmware reflash. */
+static hid_command_t resolve_command(const cJSON *command, const char *name)
+{
+    hid_command_t result = {0};
+    const cJSON *hid = cJSON_GetObjectItemCaseSensitive((cJSON *)command, "hid");
+    if (cJSON_IsObject(hid)) {
+        const cJSON *page = cJSON_GetObjectItemCaseSensitive((cJSON *)hid, "page");
+        const cJSON *usage = cJSON_GetObjectItemCaseSensitive((cJSON *)hid, "usage");
+        if (cJSON_IsString(page) && cJSON_IsNumber(usage)) {
+            bool consumer = !strcmp(page->valuestring, "consumer");
+            bool keyboard = !strcmp(page->valuestring, "keyboard");
+            double value = usage->valuedouble;
+            /* Limits match the HID report map: keyboard usages 1-0xF1, consumer usages 1-0x3FF. */
+            if ((keyboard && value >= 1 && value <= 0xF1) || (consumer && value >= 1 && value <= 0x3FF)) {
+                result.consumer = consumer;
+                result.usage = (uint16_t)value;
+            }
+        }
+        return result;
+    }
+    return legacy_command_key(name);
+}
+
+/* Wi-Fi change requested from the web UI ("wifi" object in the poll response). */
+#define WIFI_APPLY_TIMEOUT_MS 20000
+static char last_wifi_change_id[40];   /* never apply the same change twice */
+static char wifi_result_id[40];        /* change whose outcome still has to be reported to the server */
+static bool wifi_result_ok;
+
+static esp_err_t save_wifi_credentials(const char *ssid, const char *password)
+{
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open("tv_remote", NVS_READWRITE, &nvs);
+    if (err != ESP_OK) return err;
+    err = nvs_set_str(nvs, "ssid", ssid);
+    if (err == ESP_OK) err = nvs_set_str(nvs, "password", password);
+    if (err == ESP_OK) err = nvs_commit(nvs);
+    nvs_close(nvs);
+    return err;
+}
+
+/* Try the new network first; keep it only if the board gets an IP and can reach the backend through it.
+ * Otherwise restore the previous credentials so a typo cannot strand the remote. NVS is written last. */
+static bool apply_wifi_change(const char *ssid, const char *password)
+{
+    wifi_config_t previous, next;
+    if (esp_wifi_get_config(WIFI_IF_STA, &previous) != ESP_OK) return false;
+    next = previous;
+    memset(next.sta.ssid, 0, sizeof(next.sta.ssid));
+    memset(next.sta.password, 0, sizeof(next.sta.password));
+    memcpy(next.sta.ssid, ssid, strlen(ssid));
+    memcpy(next.sta.password, password, strlen(password));
+
+    ESP_LOGI(TAG, "Trying new Wi-Fi network %s", ssid);
+    xEventGroupClearBits(wifi_events, WIFI_HAS_IP);
+    esp_wifi_set_config(WIFI_IF_STA, &next);
+    esp_wifi_disconnect();   /* the disconnect handler reconnects with the new configuration */
+    EventBits_t bits = xEventGroupWaitBits(wifi_events, WIFI_HAS_IP, pdFALSE, pdTRUE, pdMS_TO_TICKS(WIFI_APPLY_TIMEOUT_MS));
+    char poll[160];
+    snprintf(poll, sizeof(poll), "{\"device_id\":\"%s\",\"name\":\"%s\"}", device_id, ble_name);
+    bool ok = (bits & WIFI_HAS_IP) && post_json("/api/poll", poll, NULL, 0) &&
+              save_wifi_credentials(ssid, password) == ESP_OK;
+    if (ok) {
+        ESP_LOGI(TAG, "Switched to Wi-Fi network %s", ssid);
+    } else {
+        ESP_LOGW(TAG, "Could not use Wi-Fi network %s; restoring the previous one", ssid);
+        esp_wifi_set_config(WIFI_IF_STA, &previous);
+        esp_wifi_disconnect();
+    }
+    return ok;
+}
 
 static void backend_task(void *arg)
 {
@@ -237,6 +334,12 @@ static void backend_task(void *arg)
     bool registered = false;
     while (true) {
         xEventGroupWaitBits(wifi_events, WIFI_HAS_IP, pdFALSE, pdTRUE, portMAX_DELAY);
+        if (wifi_result_id[0]) {
+            char result[160];
+            snprintf(result, sizeof(result), "{\"device_id\":\"%s\",\"change_id\":\"%s\",\"ok\":%s}",
+                     device_id, wifi_result_id, wifi_result_ok ? "true" : "false");
+            if (post_json("/api/wifi/result", result, NULL, 0)) wifi_result_id[0] = '\0';
+        }
         char response[sizeof(http_response)];
         char poll[160];
         snprintf(poll, sizeof(poll), "{\"device_id\":\"%s\",\"name\":\"%s\"}", device_id, ble_name);
@@ -251,8 +354,9 @@ static void backend_task(void *arg)
                 cJSON *id = cJSON_GetObjectItemCaseSensitive(command, "id");
                 cJSON *name = cJSON_GetObjectItemCaseSensitive(command, "key");
                 if (cJSON_IsString(id) && cJSON_IsString(name)) {
-                    uint8_t usage = command_key(name->valuestring);
-                    bool sent = usage && esp_hidd_dev_connected(hid_device) && send_key(usage) == ESP_OK;
+                    hid_command_t hid = resolve_command(command, name->valuestring);
+                    bool sent = hid.usage && esp_hidd_dev_connected(hid_device) &&
+                                (hid.consumer ? send_consumer(hid.usage) : send_key((uint8_t)hid.usage)) == ESP_OK;
                     if (sent) {
                         char ack[192];
                         snprintf(ack, sizeof(ack), "{\"device_id\":\"%s\",\"command_id\":\"%s\"}", device_id, id->valuestring);
@@ -260,6 +364,21 @@ static void backend_task(void *arg)
                     } else {
                         ESP_LOGW(TAG, "Unknown key command or BLE send failed");
                     }
+                }
+            }
+            const cJSON *wifi = root ? cJSON_GetObjectItemCaseSensitive(root, "wifi") : NULL;
+            if (cJSON_IsObject(wifi)) {
+                const cJSON *change_id = cJSON_GetObjectItemCaseSensitive((cJSON *)wifi, "id");
+                const cJSON *ssid = cJSON_GetObjectItemCaseSensitive((cJSON *)wifi, "ssid");
+                const cJSON *password = cJSON_GetObjectItemCaseSensitive((cJSON *)wifi, "password");
+                if (cJSON_IsString(change_id) && cJSON_IsString(ssid) && cJSON_IsString(password) &&
+                    strlen(change_id->valuestring) < sizeof(last_wifi_change_id) &&
+                    strcmp(change_id->valuestring, last_wifi_change_id) != 0) {
+                    size_t ssid_len = strlen(ssid->valuestring), password_len = strlen(password->valuestring);
+                    strlcpy(last_wifi_change_id, change_id->valuestring, sizeof(last_wifi_change_id));
+                    strlcpy(wifi_result_id, change_id->valuestring, sizeof(wifi_result_id));
+                    wifi_result_ok = ssid_len >= 1 && ssid_len <= 32 && password_len <= 63 &&
+                                     apply_wifi_change(ssid->valuestring, password->valuestring);
                 }
             }
             cJSON_Delete(root);
@@ -318,7 +437,7 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(esp_hidd_dev_init(&hid_config, ESP_HID_TRANSPORT_BLE, hid_event_handler, &hid_device));
 
-    xTaskCreate(backend_task, "backend_poll", 6144, NULL, 5, NULL);
+    xTaskCreate(backend_task, "backend_poll", 8192, NULL, 5, NULL);
 
     configure_buttons();
     ESP_LOGI(TAG, "Ready. BLE HID name: %s", ble_name);

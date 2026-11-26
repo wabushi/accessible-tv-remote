@@ -73,6 +73,9 @@ button { font: inherit; }
 .back-buttons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .back-button { min-width: 0; min-height: 44px; gap: 6px; padding: 0 6px; border-radius: 15px; background: #26343e; font-size: .95rem; }
 .xiaomi-back-button { min-height: 38px; border-style: dashed; color: #c4cdd2; font-size: .85rem; }
+.media-buttons { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.media-button { flex-direction: column; min-width: 0; min-height: 56px; gap: 2px; padding: 4px; border-radius: 15px; background: #26343e; font-size: .8rem; }
+.media-symbol { color: var(--accent); font-size: 1.3rem; line-height: 1; }
 .back-symbol { color: var(--accent); font-size: 1.25rem; }
 h2 { margin: 0 0 12px 2px; color: #aeb9c0; font-size: .74rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
 .number-pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; padding: 14px; border: 1px solid #293640; border-radius: 28px; background: #151f27; }
@@ -107,3 +110,23 @@ h2 { margin: 0 0 12px 2px; color: #aeb9c0; font-size: .74rem; font-weight: 700; 
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
 @media (max-width: 360px) { .remote-shell { padding-right: 16px; padding-left: 16px; } .xiaomi-back-button { font-size: .76rem; } }
+
+.device-gear { color: var(--accent); font-size: 1rem; line-height: 1; }
+.wifi-dialog { text-align: left; }
+.wifi-dialog h2 { text-align: center; overflow-wrap: anywhere; }
+.wifi-help { margin-bottom: 14px !important; font-size: .9rem; }
+.wifi-field { display: block; margin-top: 12px; color: #c4cdd2; font-size: .88rem; font-weight: 600; }
+.wifi-optional { color: #8d9aa2; font-weight: 400; }
+.wifi-field input { box-sizing: border-box; width: 100%; min-height: 46px; margin-top: 6px; padding: 0 12px; border: 1px solid #34444f; border-radius: 12px; background: #111a21; color: #f3f5f6; font: inherit; font-size: 1rem; }
+.wifi-field input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.wifi-field input:disabled { opacity: .6; }
+.wifi-password-row { display: flex; gap: 8px; }
+.wifi-password-row input { flex: 1 1 auto; min-width: 0; }
+.wifi-show { flex: 0 0 auto; align-self: flex-end; min-height: 46px; padding: 0 14px; border: 1px solid #34444f; border-radius: 12px; background: #23313c; color: #f3f5f6; font: inherit; font-weight: 700; cursor: pointer; }
+.wifi-message { margin-top: 12px !important; font-size: .9rem; }
+.wifi-warning { color: #f0c36a !important; }
+.wifi-error, .wifi-failed { color: #ff9b8f !important; }
+.wifi-applied { color: #71d9a6 !important; }
+.confirm-actions button:disabled { opacity: .55; cursor: default; }
+.input-button { grid-area: 1 / 1; flex-direction: column; gap: 3px; min-height: 0; padding: 4px; border-radius: 19px; background: #26343e; font-size: .8rem; line-height: 1.15; text-align: center; }
+.input-symbol { color: var(--accent); font-size: 1.4rem; line-height: 1; }

@@ -29,6 +29,7 @@ function App() {
   const [sending, setSending] = React.useState(false);
   const [padMode, setPadMode] = React.useState('directions');
   const [devices, setDevices] = React.useState([]);
+  const [extraKeys, setExtraKeys] = React.useState([]);
   const [selectedDeviceId, setSelectedDeviceId] = React.useState('');
   const [recording, setRecording] = React.useState(false);
   const [recordedActions, setRecordedActions] = React.useState([]);
@@ -36,7 +37,32 @@ function App() {
   const recordingReady = React.useRef(false);
   const [happySeconds, setHappySeconds] = React.useState(0);
   const [confirmAction, setConfirmAction] = React.useState(null);
+  const [wifiOpen, setWifiOpen] = React.useState(false);
+  const [wifiSsid, setWifiSsid] = React.useState('');
+  const [wifiPassword, setWifiPassword] = React.useState('');
+  const [wifiShowPassword, setWifiShowPassword] = React.useState(false);
+  const [wifiSubmitting, setWifiSubmitting] = React.useState(false);
+  const [wifiError, setWifiError] = React.useState('');
   const happyLocked = React.useRef(false);
+
+  React.useEffect(() => {
+    if (!wifiOpen) return undefined;
+    function closeOnEscape(event) {
+      if (event.key === 'Escape') closeWifi();
+    }
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [wifiOpen]);
+
+  React.useEffect(() => {
+    let active = true;
+    // Extra buttons (Home, volume, ...) are defined on the server in backend/keys.json.
+    fetch('/api/keys')
+      .then((response) => response.ok ? response.json() : { keys: [] })
+      .then((result) => { if (active && Array.isArray(result.keys)) setExtraKeys(result.keys); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
 
   React.useEffect(() => {
     let active = true;
@@ -165,6 +191,36 @@ function App() {
     }
   }
 
+  function closeWifi() {
+    setWifiOpen(false);
+    setWifiSsid('');
+    setWifiPassword('');       // never keep the password around after the overlay closes
+    setWifiShowPassword(false);
+    setWifiError('');
+  }
+
+  async function submitWifi(event) {
+    event.preventDefault();
+    if (!selectedDeviceId || wifiSubmitting) return;
+    setWifiSubmitting(true);
+    setWifiError('');
+    try {
+      const response = await fetch('/api/wifi', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_id: selectedDeviceId, ssid: wifiSsid, password: wifiPassword }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not send the Wi-Fi settings');
+      setWifiPassword('');
+      setWifiShowPassword(false);
+    } catch (error) {
+      setWifiError(error.message);
+    } finally {
+      setWifiSubmitting(false);
+    }
+  }
+
   const back = { key: 'BACK', label: 'Back (Escape)' };
   const xiaomiBack = { key: 'BACK_XIAOMI', label: 'Xiaomi Back (usage F1)' };
   const selectedDevice = devices.find((device) => device.device_id === selectedDeviceId);
@@ -182,10 +238,17 @@ function App() {
               role="tab"
               aria-selected={device.device_id === selectedDeviceId}
               aria-controls="remote-panel"
-              onClick={() => { setSelectedDeviceId(device.device_id); setStatus({ text: 'Ready when you are', kind: 'ready' }); }}
+              aria-haspopup="dialog"
+              title={device.device_id === selectedDeviceId ? 'Wi-Fi settings' : undefined}
+              onClick={() => {
+                if (device.device_id === selectedDeviceId) { setWifiOpen(true); return; }
+                setSelectedDeviceId(device.device_id);
+                setStatus({ text: 'Ready when you are', kind: 'ready' });
+              }}
             >
               <span className={`device-dot${device.online ? ' online' : ''}`} aria-hidden="true" />
               <span className="device-name">{device.name || device.device_id}</span>
+              {device.device_id === selectedDeviceId && <span className="device-gear" aria-hidden="true">⚙</span>}
             </button>
           ))}
           {devices.length === 0 && <span className="device-empty" role="status">Waiting for ESP32…</span>}
@@ -218,6 +281,11 @@ function App() {
                   {command.symbol}
                 </RemoteButton>
               ))}
+              {extraKeys.filter((key) => key.group === 'pad').slice(0, 1).map((command) => (
+                <RemoteButton key={command.key} command={command} onSend={sendKey} className="input-button" disabled={remoteDisabled}>
+                  <span className="input-symbol" aria-hidden="true">{command.symbol}</span>{command.label}
+                </RemoteButton>
+              ))}
               <button type="button" className={`record-button${recording ? ' is-recording' : ''}`} onClick={() => setConfirmAction(recording ? 'stop-recording' : 'start-recording')} aria-pressed={recording} disabled={!recordingLoaded || remoteDisabled}>
                 <span className="record-dot" aria-hidden="true" />{recording ? 'Stop' : 'Record'}
                 <span className="recording-count">{recordedActions.length} {recordedActions.length === 1 ? 'action' : 'actions'}</span>
@@ -239,6 +307,13 @@ function App() {
             <span className="back-symbol" aria-hidden="true">↶</span>Xiaomi Back · F1
           </RemoteButton>
         </div>
+        {extraKeys.some((key) => key.group === 'extra') && <div className="media-buttons" role="group" aria-label="TV controls">
+          {extraKeys.filter((key) => key.group === 'extra').map((command) => (
+            <RemoteButton key={command.key} command={command} onSend={sendKey} className="media-button" disabled={remoteDisabled}>
+              <span className="media-symbol" aria-hidden="true">{command.symbol}</span>{command.label}
+            </RemoteButton>
+          ))}
+        </div>}
         </section>
 
         <section className="happy-section" aria-label="Happy button">
@@ -251,6 +326,45 @@ function App() {
         </button>
         </section>
       </section>
+      {wifiOpen && selectedDevice && (() => {
+        const wifi = selectedDevice.wifi;
+        const busy = wifiSubmitting || (wifi && (wifi.status === 'pending' || wifi.status === 'delivered'));
+        const passwordTooShort = wifiPassword.length > 0 && wifiPassword.length < 8;
+        return (
+          <div className="confirm-backdrop" onClick={(event) => { if (event.target === event.currentTarget) closeWifi(); }}>
+            <form className="confirm-dialog wifi-dialog" role="dialog" aria-modal="true" aria-labelledby="wifi-title" onSubmit={submitWifi}>
+              <h2 id="wifi-title">Wi-Fi for {selectedDevice.name || selectedDevice.device_id}</h2>
+              <p className="wifi-help">The remote tries the new network first and keeps its current one if it cannot connect.</p>
+              <label className="wifi-field">Network name
+                <input type="text" value={wifiSsid} onChange={(event) => setWifiSsid(event.target.value)} maxLength={32}
+                  autoComplete="off" autoCapitalize="off" spellCheck="false" autoFocus required disabled={busy} />
+              </label>
+              <label className="wifi-field">Password <span className="wifi-optional">(empty for an open network)</span>
+                <span className="wifi-password-row">
+                  <input type={wifiShowPassword ? 'text' : 'password'} value={wifiPassword} onChange={(event) => setWifiPassword(event.target.value)}
+                    maxLength={63} autoComplete="new-password" spellCheck="false" disabled={busy} />
+                  <button type="button" className="wifi-show" aria-pressed={wifiShowPassword} onClick={() => setWifiShowPassword((shown) => !shown)}>{wifiShowPassword ? 'Hide' : 'Show'}</button>
+                </span>
+              </label>
+              {passwordTooShort && <p className="wifi-message wifi-warning" role="status">Passwords need at least 8 characters.</p>}
+              {wifiError && <p className="wifi-message wifi-error" role="alert">{wifiError}</p>}
+              {wifi && (
+                <p className={`wifi-message wifi-${wifi.status}`} role="status" aria-live="polite">
+                  {wifi.status === 'pending' && `Waiting for the remote to pick up “${wifi.ssid}”…`}
+                  {wifi.status === 'delivered' && `Remote is trying “${wifi.ssid}”…`}
+                  {wifi.status === 'applied' && `Connected to “${wifi.ssid}”.`}
+                  {wifi.status === 'failed' && (wifi.error || 'The change did not work.')}
+                </p>
+              )}
+              {!selectedDevice.online && <p className="wifi-message wifi-warning" role="status">This remote is offline; the change is applied when it next connects.</p>}
+              <div className="confirm-actions">
+                <button type="button" className="confirm-cancel" onClick={closeWifi}>Close</button>
+                <button type="submit" className="confirm-yes" disabled={busy || !wifiSsid || passwordTooShort}>{busy ? 'Working…' : 'Change Wi-Fi'}</button>
+              </div>
+            </form>
+          </div>
+        );
+      })()}
       {confirmAction && (
         <div className="confirm-backdrop" onClick={(event) => { if (event.target === event.currentTarget) setConfirmAction(null); }}>
           <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
