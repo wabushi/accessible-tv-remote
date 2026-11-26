@@ -10,6 +10,67 @@ const arrows = [
   { key: 'DOWN', label: 'Down', symbol: '↓', position: 'down' },
 ];
 
+const HOLD_MS = 600;
+
+// A button that can send one of several candidate codes: tap sends the current one,
+// press-and-hold (or Shift+Enter / Shift+Space) switches to the next. The choice is remembered.
+function VariantButton({ command, onSend, onAnnounce, disabled }) {
+  const variants = command.variants;
+  const storageKey = `variant:${command.key}`;
+  const [index, setIndex] = React.useState(() => {
+    try {
+      const saved = Number(window.localStorage.getItem(storageKey));
+      return Number.isInteger(saved) && saved >= 0 && saved < variants.length ? saved : 0;
+    } catch (error) { return 0; }
+  });
+  const press = React.useRef({ timer: null, long: false });
+  const current = variants[Math.min(index, variants.length - 1)];
+
+  function cycle() {
+    const next = (index + 1) % variants.length;
+    setIndex(next);
+    try { window.localStorage.setItem(storageKey, String(next)); } catch (error) { /* private mode */ }
+    if (navigator.vibrate) navigator.vibrate(40);
+    onAnnounce(`${command.label}: code ${next + 1} of ${variants.length} · ${variants[next].label}`);
+  }
+  function startPress() {
+    if (disabled) return;
+    press.current.long = false;
+    window.clearTimeout(press.current.timer);
+    press.current.timer = window.setTimeout(() => { press.current.long = true; cycle(); }, HOLD_MS);
+  }
+  function endPress() { window.clearTimeout(press.current.timer); }
+
+  return (
+    <button
+      type="button"
+      className="remote-button input-button"
+      aria-label={`${command.label}, code ${index + 1} of ${variants.length}: ${current.label}. Tap to send. Press and hold, or Shift and Enter, to switch code.`}
+      disabled={disabled}
+      onPointerDown={startPress}
+      onPointerUp={endPress}
+      onPointerLeave={endPress}
+      onPointerCancel={endPress}
+      onContextMenu={(event) => event.preventDefault()}
+      onKeyDown={(event) => {
+        if (event.shiftKey && (event.key === 'Enter' || event.key === ' ')) {
+          event.preventDefault();
+          press.current.long = true;   // swallow the click that follows the key press
+          cycle();
+        }
+      }}
+      onClick={() => {
+        if (press.current.long) { press.current.long = false; return; }
+        onSend(current.key);
+      }}
+    >
+      <span className="input-symbol" aria-hidden="true">{command.symbol}</span>
+      {command.label}
+      <span className="input-variant" aria-hidden="true">{index + 1}/{variants.length} · {current.label}</span>
+    </button>
+  );
+}
+
 function RemoteButton({ command, onSend, children, className = '', disabled = false }) {
   return (
     <button
@@ -281,11 +342,11 @@ function App() {
                   {command.symbol}
                 </RemoteButton>
               ))}
-              {extraKeys.filter((key) => key.group === 'pad').slice(0, 1).map((command) => (
-                <RemoteButton key={command.key} command={command} onSend={sendKey} className="input-button" disabled={remoteDisabled}>
-                  <span className="input-symbol" aria-hidden="true">{command.symbol}</span>{command.label}
-                </RemoteButton>
-              ))}
+              {extraKeys.filter((key) => key.group === 'pad').slice(0, 1).map((command) => (command.variants && command.variants.length > 0
+                ? <VariantButton key={command.key} command={command} onSend={sendKey} onAnnounce={(text) => setStatus({ text, kind: 'ready' })} disabled={remoteDisabled} />
+                : <RemoteButton key={command.key} command={command} onSend={sendKey} className="input-button" disabled={remoteDisabled}>
+                    <span className="input-symbol" aria-hidden="true">{command.symbol}</span>{command.label}
+                  </RemoteButton>))}
               <button type="button" className={`record-button${recording ? ' is-recording' : ''}`} onClick={() => setConfirmAction(recording ? 'stop-recording' : 'start-recording')} aria-pressed={recording} disabled={!recordingLoaded || remoteDisabled}>
                 <span className="record-dot" aria-hidden="true" />{recording ? 'Stop' : 'Record'}
                 <span className="recording-count">{recordedActions.length} {recordedActions.length === 1 ? 'action' : 'actions'}</span>

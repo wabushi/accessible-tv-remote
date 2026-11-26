@@ -55,9 +55,19 @@ def key_catalog():
             if not isinstance(name, str) or not name or len(name) > 32 or hid is None:
                 print(f"Ignoring invalid entry in {KEYS_FILE}: {entry!r}")
                 continue
+            variants = []
+            for variant in entry.get("variants", [])[:64] if isinstance(entry.get("variants"), list) else []:
+                variant_hid = _parse_hid(variant)
+                if variant_hid is None:
+                    print(f"Ignoring invalid variant of {name} in {KEYS_FILE}: {variant!r}")
+                    continue
+                prefix = "KB" if variant_hid["page"] == "keyboard" else "CC"
+                variants.append({"label": str(variant.get("label", ""))[:40],
+                                 "key": f"{prefix}:{variant_hid['usage']:X}"})
             catalog[name] = {"key": name, "label": str(entry.get("label", name))[:32],
                              "symbol": str(entry.get("symbol", ""))[:8],
-                             "group": str(entry.get("group", "extra"))[:16], "hid": hid}
+                             "group": str(entry.get("group", "extra"))[:16], "hid": hid,
+                             "variants": variants}
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
         if mtime is not None:
             print(f"Could not read {KEYS_FILE}: {error}")

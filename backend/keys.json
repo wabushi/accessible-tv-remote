@@ -10,7 +10,142 @@
         "page": "keyboard",
         "usage": "0x73"
       },
-      "_note": "Best evidence, not confirmed on a TV: a forum post's Kodi log shows the Xiaomi remote's INPUT button as scancode 0xc2 (Linux KEY_F24 = keyboard-page usage 0x73); its TTX button logs 0x88 = KEY_FIND, so those scancodes are Linux keycodes. Consumer 0xB2 (KEY_RECORD) was tried first and did nothing. If this fails too, capture the real code with evtest and edit this entry."
+      "_note": "No documented HID code for the Xiaomi INPUT button exists. 'variants' are candidates the web button cycles through (tap = send the current one, long-press = switch to the next; the choice is remembered in the browser). Once one works, put it in 'hid' and delete 'variants'. Keyboard F24 (0x73) comes from a Xiaomi stick remote's Kodi log (scancode 0xc2 = KEY_F24); Consumer 0xB2 was tried first and did nothing.",
+      "variants": [
+        {
+          "label": "F24 (best evidence)",
+          "hid": {
+            "page": "keyboard",
+            "usage": "0x73"
+          }
+        },
+        {
+          "label": "Consumer Record (0xB2)",
+          "hid": {
+            "page": "consumer",
+            "usage": "0xB2"
+          }
+        },
+        {
+          "label": "F13",
+          "hid": {
+            "page": "keyboard",
+            "usage": "0x68"
+          }
+        },
+        {
+          "label": "F14",
+          "hid": {
+            "page": "keyboard",
+            "usage": "0x69"
+          }
+        },
+        {
+          "label": "F15",
+          "hid": {
+            "page": "keyboard",
+            "usage": "0x6a"
+          }
+        },
+        {
+          "label": "F16",
+          "hid": {
+            "page": "keyboard",
+            "usage": "0x6b"
+          }
+        },
+        {
+          "label": "F17",
+          "hid": {
+            "page": "keyboard",
+            "usage": "0x6c"
+          }
+        },
+        {
+          "label": "F18",
+          "hid": {
+            "page": "keyboard",
+            "usage": "0x6d"
+          }
+        },
+        {
+          "label": "F19",
+          "hid": {
+            "page": "keyboard",
+            "usage": "0x6e"
+          }
+        },
+        {
+          "label": "F20",
+          "hid": {
+            "page": "keyboard",
+            "usage": "0x6f"
+          }
+        },
+        {
+          "label": "F21",
+          "hid": {
+            "page": "keyboard",
+            "usage": "0x70"
+          }
+        },
+        {
+          "label": "F22",
+          "hid": {
+            "page": "keyboard",
+            "usage": "0x71"
+          }
+        },
+        {
+          "label": "F23",
+          "hid": {
+            "page": "keyboard",
+            "usage": "0x72"
+          }
+        },
+        {
+          "label": "Media Select TV (0x89)",
+          "hid": {
+            "page": "consumer",
+            "usage": "0x89"
+          }
+        },
+        {
+          "label": "Media Select PC (0x88)",
+          "hid": {
+            "page": "consumer",
+            "usage": "0x88"
+          }
+        },
+        {
+          "label": "Video next (0x82)",
+          "hid": {
+            "page": "consumer",
+            "usage": "0x82"
+          }
+        },
+        {
+          "label": "VCR/TV (0x63)",
+          "hid": {
+            "page": "consumer",
+            "usage": "0x63"
+          }
+        },
+        {
+          "label": "VCR (0x92)",
+          "hid": {
+            "page": "consumer",
+            "usage": "0x92"
+          }
+        },
+        {
+          "label": "TV2 (0x97)",
+          "hid": {
+            "page": "consumer",
+            "usage": "0x97"
+          }
+        }
+      ]
     }
   ]
 }

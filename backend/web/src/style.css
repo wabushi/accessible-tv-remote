@@ -130,3 +130,5 @@ h2 { margin: 0 0 12px 2px; color: #aeb9c0; font-size: .74rem; font-weight: 700; 
 .confirm-actions button:disabled { opacity: .55; cursor: default; }
 .input-button { grid-area: 1 / 1; flex-direction: column; gap: 3px; min-height: 0; padding: 4px; border-radius: 19px; background: #26343e; font-size: .8rem; line-height: 1.15; text-align: center; }
 .input-symbol { color: var(--accent); font-size: 1.4rem; line-height: 1; }
+.input-button { -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; }
+.input-variant { max-width: 100%; overflow: hidden; color: #8d9aa2; font-size: .62rem; font-weight: 600; line-height: 1.1; text-overflow: ellipsis; white-space: nowrap; }
