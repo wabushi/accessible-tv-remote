@@ -273,6 +273,15 @@ STARTED_AT = time.time()
 SLOW_REQUEST_SECONDS = 1.0
 
 
+def wifi_view_locked(device_id, record):
+    """wifi_status_locked plus `blocked`: the change is waiting but this remote only reaches us over plain HTTP,
+    where passwords are never handed out, so it can never be delivered."""
+    status = wifi_status_locked(device_id)
+    if status:
+        status["blocked"] = status["status"] == "pending" and record.get("secure") is False
+    return status
+
+
 class Handler(BaseHTTPRequestHandler):
     # A client that stalls mid-request (flaky mobile hotspot, half-open connection) can no longer pin a thread forever.
     timeout = 30
@@ -316,7 +325,8 @@ class Handler(BaseHTTPRequestHandler):
                            "name": record.get("name", device_id),
                            "online": now - record.get("last_seen", 0) < 4,
                            "pending": len(queues.get(device_id, ())),
-                           "wifi": wifi_status_locked(device_id)}
+                           "secure": record.get("secure"),
+                           "wifi": wifi_view_locked(device_id, record)}
                           for device_id, record in sorted(devices.items(), key=lambda item: item[1].get("name", item[0]).casefold())]
             return self.send_json(200, {"devices": result})
         if path == "/api/health":
@@ -353,6 +363,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         path = unquote(urlsplit(self.path).path)
+        if path.startswith("/api/wifi/"):
+            target = path[len("/api/wifi/"):]
+            with lock:
+                removed = wifi_changes.pop(target, None)
+            return self.send_json(200 if removed else 404, {"cancelled": bool(removed)})
         prefix = "/api/devices/"
         if not path.startswith(prefix):
             return self.send_json(404, {"error": "not found"})
@@ -447,7 +462,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(name, str) or not name or len(name) > 64:
                     name = device_id
                 new_device = device_id not in devices or devices[device_id].get("name") != name
-                devices[device_id] = {"name": name, "last_seen": time.time()}
+                devices[device_id] = {"name": name, "last_seen": time.time(), "secure": secure_transport(self)}
                 if new_device:
                     save_devices_locked()
                 pending = queues.get(device_id)

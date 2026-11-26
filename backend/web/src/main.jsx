@@ -199,6 +199,16 @@ function App() {
     setWifiError('');
   }
 
+  async function cancelWifi() {
+    if (!selectedDeviceId) return;
+    try {
+      await fetch(`/api/wifi/${encodeURIComponent(selectedDeviceId)}`, { method: 'DELETE' });
+      setWifiError('');
+    } catch (error) {
+      setWifiError('Could not cancel the change');
+    }
+  }
+
   async function submitWifi(event) {
     event.preventDefault();
     if (!selectedDeviceId || wifiSubmitting) return;
@@ -345,7 +355,8 @@ function App() {
               {wifiError && <p className="wifi-message wifi-error" role="alert">{wifiError}</p>}
               {wifi && (
                 <p className={`wifi-message wifi-${wifi.status}`} role="status" aria-live="polite">
-                  {wifi.status === 'pending' && `Waiting for the remote to pick up “${wifi.ssid}”…`}
+                  {wifi.status === 'pending' && !wifi.blocked && `Waiting for the remote to pick up “${wifi.ssid}”…`}
+                  {wifi.status === 'pending' && wifi.blocked && 'This remote reaches the server over plain HTTP, so it will never receive a Wi-Fi password (it would travel unencrypted). Re-flash it with an https:// backend URL, or cancel.'}
                   {wifi.status === 'delivered' && `Remote is trying “${wifi.ssid}”…`}
                   {wifi.status === 'applied' && `Connected to “${wifi.ssid}”.`}
                   {wifi.status === 'failed' && (wifi.error || 'The change did not work.')}
@@ -353,7 +364,9 @@ function App() {
               )}
               {!selectedDevice.online && <p className="wifi-message wifi-warning" role="status">This remote is offline; the change is applied when it next connects.</p>}
               <div className="confirm-actions">
-                <button type="button" className="confirm-cancel" onClick={closeWifi}>Close</button>
+                {wifi && (wifi.status === 'pending' || wifi.status === 'delivered')
+                  ? <button type="button" className="confirm-cancel" onClick={cancelWifi}>Cancel change</button>
+                  : <button type="button" className="confirm-cancel" onClick={closeWifi}>Close</button>}
                 <button type="submit" className="confirm-yes" disabled={busy || !wifiSsid || passwordTooShort}>{busy ? 'Working…' : 'Change Wi-Fi'}</button>
               </div>
             </form>

@@ -128,3 +128,4 @@ h2 { margin: 0 0 12px 2px; color: #aeb9c0; font-size: .74rem; font-weight: 700; 
 .wifi-error, .wifi-failed { color: #ff9b8f !important; }
 .wifi-applied { color: #71d9a6 !important; }
 .confirm-actions button:disabled { opacity: .55; cursor: default; }
+.wifi-pending { color: #c4cdd2; }
