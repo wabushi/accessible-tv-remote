@@ -7,10 +7,10 @@
       "symbol": "⎘",
       "group": "pad",
       "hid": {
-        "page": "consumer",
-        "usage": "0xB2"
+        "page": "keyboard",
+        "usage": "0x73"
       },
-      "_note": "UNVERIFIED: a forum post reports the Xiaomi remote INPUT button as Linux KEY_RECORD, which is Consumer usage 0xB2. If it does nothing on your TV, capture the real code with evtest on a Xiaomi remote and edit this entry; no firmware change needed."
+      "_note": "Best evidence, not confirmed on a TV: a forum post's Kodi log shows the Xiaomi remote's INPUT button as scancode 0xc2 (Linux KEY_F24 = keyboard-page usage 0x73); its TTX button logs 0x88 = KEY_FIND, so those scancodes are Linux keycodes. Consumer 0xB2 (KEY_RECORD) was tried first and did nothing. If this fails too, capture the real code with evtest and edit this entry."
     }
   ]
 }
