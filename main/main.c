@@ -1,6 +1,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -23,6 +24,8 @@
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
 #include "nvs.h"
+#include "lwip/netdb.h"
+#include "lwip/sockets.h"
 #include "nvs_flash.h"
 
 #define BUTTON_COUNT 5
@@ -230,12 +233,37 @@ static uint8_t command_key(const char *command)
     return 0;
 }
 
+
+static void diag_connect(void)  /* TEMP DIAGNOSTIC */
+{
+    const char *host = strstr(backend_url, "://") + 3;
+    char h[96]; size_t n = strcspn(host, ":/"); memcpy(h, host, n); h[n] = 0;
+    struct addrinfo hints = {.ai_socktype = SOCK_STREAM}, *res = NULL;
+    int64_t t0 = esp_timer_get_time();
+    int rc = getaddrinfo(h, "443", &hints, &res);
+    ESP_LOGW(TAG, "DIAG getaddrinfo(%s)=%d in %lld ms", h, rc, (esp_timer_get_time() - t0) / 1000);
+    for (struct addrinfo *a = res; a; a = a->ai_next) {
+        char ip[64] = "?";
+        if (a->ai_family == AF_INET) inet_ntop(AF_INET, &((struct sockaddr_in *)a->ai_addr)->sin_addr, ip, sizeof(ip));
+        ESP_LOGW(TAG, "DIAG family=%d addr=%s", a->ai_family, ip);
+        int fd = socket(a->ai_family, SOCK_STREAM, 0);
+        struct timeval tv = {.tv_sec = 5};
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        t0 = esp_timer_get_time();
+        int c = connect(fd, a->ai_addr, a->ai_addrlen);
+        ESP_LOGW(TAG, "DIAG connect=%d errno=%d in %lld ms", c, errno, (esp_timer_get_time() - t0) / 1000);
+        close(fd);
+    }
+    if (res) freeaddrinfo(res);
+}
+
 static void backend_task(void *arg)
 {
     (void)arg;
     bool registered = false;
     while (true) {
         xEventGroupWaitBits(wifi_events, WIFI_HAS_IP, pdFALSE, pdTRUE, portMAX_DELAY);
+        diag_connect();
         char response[sizeof(http_response)];
         char poll[160];
         snprintf(poll, sizeof(poll), "{\"device_id\":\"%s\",\"name\":\"%s\"}", device_id, ble_name);
