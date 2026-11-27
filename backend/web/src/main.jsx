@@ -265,6 +265,9 @@ function App() {
   const back = { key: 'BACK', label: 'Back (Escape)' };
   const xiaomiBack = { key: 'BACK_XIAOMI', label: 'Xiaomi Back (usage F1)' };
   const selectedDevice = devices.find((device) => device.device_id === selectedDeviceId);
+  const selectedDeviceName = `${selectedDevice?.name || ''} ${selectedDevice?.device_id || ''}`.toUpperCase();
+  const homeKey = selectedDeviceName.includes('HOT') ? 'HID_HOT' : 'HID_TV';
+  const homeCommand = extraKeys.find((command) => command.key === homeKey);
   const remoteDisabled = !selectedDeviceId || sending;
   return (
     <main className="remote-shell">
@@ -322,6 +325,7 @@ function App() {
                   {command.symbol}
                 </RemoteButton>
               ))}
+              {homeCommand && <RemoteButton command={{ ...homeCommand, label: 'Home' }} onSend={sendKey} className="home-button" disabled={remoteDisabled}>⌂</RemoteButton>}
               <button type="button" className={`record-button${recording ? ' is-recording' : ''}`} onClick={() => setConfirmAction(recording ? 'stop-recording' : 'start-recording')} aria-pressed={recording} disabled={!recordingLoaded || remoteDisabled}>
                 <span className="record-dot" aria-hidden="true" />{recording ? 'Stop' : 'Record'}
                 <span className="recording-count">{recordedActions.length} {recordedActions.length === 1 ? 'action' : 'actions'}</span>
