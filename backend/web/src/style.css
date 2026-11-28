@@ -58,6 +58,8 @@ button { font: inherit; }
 .direction-pad, .shared-pad { height: var(--pad-size); }
 .shared-pad { grid-template-rows: repeat(4, 1fr); }
 .home-button { grid-area: 1 / 1; font-size: 2rem; }
+.arrowpad-record-button { grid-area: 3 / 1; color: var(--text); }
+.arrowpad-record-button svg { width: 1.45rem; height: 1.45rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .remote-button { display: flex; align-items: center; justify-content: center; min-width: 0; border: 1px solid #34444f; border-radius: 19px; background: var(--surface); color: #f7f8f8; font-family: inherit; font-weight: 700; cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; transition: transform .08s ease, background .12s ease, border-color .12s ease; }
 .remote-button:hover { background: var(--surface-raised); border-color: #536673; }
 .remote-button:active { transform: scale(.95); background: #2a3a45; }

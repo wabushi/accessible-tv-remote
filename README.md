@@ -66,6 +66,10 @@ The board advertises as a BLE keyboard. Pair it with the TV (or other BLE host) 
 
 If BLE key translation remains a problem, community implementations describe two possible network paths: Xiaomi MiLink (commonly TCP port 6091) on supported Xiaomi TVs, and Android TV Remote v2 (TLS, pairing required; commonly ports 6466/6467). Device support varies. Identify the TV model and its LAN IP before choosing or probing either path; these protocols are not implemented by this project yet. See [MiTV-Remote protocol notes](https://github.com/EndLess728/MiTV-Remote) for device-specific findings.
 
+## Original remote BLE capture app
+
+[`remote-sniffer/`](remote-sniffer/) contains an experimental Android app that acts as a BLE central, connects to an original remote, checks for standard HID over GATT, records input reports, and exports captures as JSON. It is separate from the ESP32 remote firmware, which acts as the BLE HID peripheral.
+
 ## Original Raspberry Pi prototype
 
 The previous implementation is retained during the migration in `tv_remote.py`, `keyboard.txt`, `tv-remote.service`, and `wiring/`. Its Raspberry Pi and btferret installation instructions are no longer the build instructions for this ESP32-C3 firmware.

@@ -268,6 +268,7 @@ function App() {
   const selectedDeviceName = `${selectedDevice?.name || ''} ${selectedDevice?.device_id || ''}`.toUpperCase();
   const homeKey = selectedDeviceName.includes('HOT') ? 'HID_HOT' : 'HID_TV';
   const homeCommand = extraKeys.find((command) => command.key === homeKey);
+  const mediaRecordCommand = extraKeys.find((command) => command.key === 'MEDIA_RECORD');
   const remoteDisabled = !selectedDeviceId || sending;
   return (
     <main className="remote-shell">
@@ -326,6 +327,9 @@ function App() {
                 </RemoteButton>
               ))}
               {homeCommand && <RemoteButton command={{ ...homeCommand, label: 'Home' }} onSend={sendKey} className="home-button" disabled={remoteDisabled}>⌂</RemoteButton>}
+              {mediaRecordCommand && <RemoteButton command={{ ...mediaRecordCommand, label: 'Input' }} onSend={sendKey} className="arrowpad-record-button" disabled={remoteDisabled}>
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3.5" y="4.5" width="17" height="15" rx="2" /><path d="M1 12h10m-4-4 4 4-4 4" /></svg>
+              </RemoteButton>}
               <button type="button" className={`record-button${recording ? ' is-recording' : ''}`} onClick={() => setConfirmAction(recording ? 'stop-recording' : 'start-recording')} aria-pressed={recording} disabled={!recordingLoaded || remoteDisabled}>
                 <span className="record-dot" aria-hidden="true" />{recording ? 'Stop' : 'Record'}
                 <span className="recording-count">{recordedActions.length} {recordedActions.length === 1 ? 'action' : 'actions'}</span>
